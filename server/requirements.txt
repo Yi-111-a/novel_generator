@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+# 引擎依赖（与根 requirements 一致）
+openai>=1.0
+python-dotenv>=1.0

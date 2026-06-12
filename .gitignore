@@ -1,0 +1,43 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+frontend/.env.local
+frontend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+
+# Data / runtime
+server/.data/
+scripts/_*
+scripts/*.log
+scripts/*.txt
+scripts/_*.json
+scripts/out_*.txt
+scripts/seed*.log
+scripts/read*.txt
+scripts/first5.txt
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude/agent local state
+.claude/

@@ -1,0 +1,261 @@
+import { AlertTriangle, FileText, Plus, Save, Trash2, UserPlus } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { getAdapter } from '../adapters';
+import { useProjectCtx } from '../components/Layouts';
+import { Collapsible, Panel } from '../components/ui';
+import { CharacterDrawer, CharactersPanel, FactionDrawer, FactionsPanel, LocationDrawer, LocationsPanel, WorldBiblePanel } from '../components/WorldPanels';
+import type { CharacterCard, Ending, Faction, Persona, PlanLocation, ProjectPlan, SeedDraft } from '../types';
+
+const uid = (p: string) => `${p}_${Math.random().toString(36).slice(2, 7)}`;
+
+export function WorldConfig() {
+  const { project } = useProjectCtx();
+  const adapter = getAdapter();
+  const [draft, setDraft] = useState<SeedDraft | null>(null);
+  const [plan, setPlan] = useState<ProjectPlan | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState<string>('');
+  // 抽屉态
+  const [locFor, setLocFor] = useState<PlanLocation | null>(null);
+  const [facFor, setFacFor] = useState<Faction | null>(null);
+  const [charFor, setCharFor] = useState<CharacterCard | null>(null);
+
+  useEffect(() => {
+    adapter.getSeedDraft(project.id).then(setDraft);
+    // 锁定后才有 plan（W1/W2/W3 都在锁定流程里跑）
+    if (project.status !== 'seeding') {
+      adapter.getPlan(project.id).then(setPlan).catch(() => {});
+    }
+  }, [project.id, project.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!draft) return <div className="p-6 text-sm text-zinc-400">载入中…</div>;
+  const wb = draft.worldBible;
+
+  const update = (mut: (d: SeedDraft) => void) => {
+    const next = structuredClone(draft);
+    mut(next);
+    setDraft(next);
+    setDirty(true);
+  };
+  const save = async () => {
+    await adapter.updateSeedDraft(project.id, draft);
+    setDirty(false);
+    setSavedAt(new Date().toLocaleTimeString('zh-CN'));
+  };
+
+  // 校验：冲突需要信息差。种子层没有逐 agent 已知事实，这里用"角色数 < 2"作近似预警。
+  const asymmetryWarning = draft.personas.length < 2;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">世界配置</h1>
+          <p className="text-sm text-zinc-500">聊天用来发想，这里用来审阅与微调结构化种子。</p>
+        </div>
+        <button className="btn-primary" onClick={save} disabled={!dirty}>
+          <Save className="h-4 w-4" /> {dirty ? '保存修改' : savedAt ? `已保存 ${savedAt}` : '已是最新'}
+        </button>
+      </div>
+
+      {asymmetryWarning && !plan?.planned && (
+        <div className="panel flex items-center gap-2 border-amber-500/40 p-3 text-sm text-amber-500">
+          <AlertTriangle className="h-4 w-4" /> 冲突需要信息差：至少需要两个角色，且他们对关键事实持不同认知（或一方知、一方不知）。
+        </div>
+      )}
+
+      {plan?.planned ? (
+        <>
+          {/* 锁定后：引擎权威设定是主体 */}
+          <div className="space-y-4">
+            <WorldBiblePanel projectId={project.id} sections={plan.bibleSections ?? []} />
+            <LocationsPanel locations={plan.locations ?? []} onPickLocation={setLocFor} />
+            <FactionsPanel factions={plan.factions ?? []} locations={plan.locations ?? []} onPickFaction={setFacFor} />
+            <CharactersPanel cards={plan.characterCards ?? []} onPickCard={setCharFor} />
+          </div>
+
+          {/* 折叠式原始种子回溯 */}
+          <Collapsible title={<span className="flex items-center gap-2 text-zinc-400"><FileText className="h-3.5 w-3.5" /> 原始种子（锁定前的草稿）</span>}>
+            <div className="space-y-3 text-xs text-zinc-500">
+              {wb.settingCore && <div><span className="font-medium">世界设定：</span>{wb.settingCore}</div>}
+              {wb.geography && <div><span className="font-medium">地理：</span>{wb.geography}</div>}
+              {wb.culture && <div><span className="font-medium">文化/禁忌：</span>{wb.culture}</div>}
+              {(wb.physicsRules ?? []).length > 0 && <div><span className="font-medium">物理法则：</span>{(wb.physicsRules ?? []).join('、')}</div>}
+              {wb.theme && <div><span className="font-medium">主题：</span>{wb.theme}</div>}
+              {wb.protagonistWant && <div><span className="font-medium">主角欲望：</span>{wb.protagonistWant}</div>}
+              {(wb.candidateEndings ?? []).length > 0 && (
+                <div><span className="font-medium">候选结局：</span>{(wb.candidateEndings ?? []).map((e) => e.summary).join('、')}</div>
+              )}
+              {draft.personas.length > 0 && (
+                <div><span className="font-medium">角色种子：</span>{draft.personas.map((p) => p.name).join('、')}</div>
+              )}
+            </div>
+          </Collapsible>
+        </>
+      ) : (
+        <>
+          {/* 未锁定：编辑阶段，显示完整种子编辑器 */}
+          <Collapsible title={<span className="flex items-center gap-2">不可变层 · 世界设定</span>}>
+            <Text label="世界设定" value={wb.settingCore ?? ''} onChange={(v) => update((d) => (d.worldBible.settingCore = v))} />
+            <Text label="地理" value={wb.geography ?? ''} onChange={(v) => update((d) => (d.worldBible.geography = v))} />
+            <Text label="文化 / 禁忌" value={wb.culture ?? ''} onChange={(v) => update((d) => (d.worldBible.culture = v))} />
+            <ListEditor label="物理法则（硬约束）" items={wb.physicsRules ?? []} onChange={(items) => update((d) => (d.worldBible.physicsRules = items))} />
+          </Collapsible>
+
+          <Collapsible title="叙事意图 · 主题与结局">
+            <Text label="主题" value={wb.theme ?? ''} onChange={(v) => update((d) => (d.worldBible.theme = v))} />
+            <Text label="主角外在欲望" value={wb.protagonistWant ?? ''} onChange={(v) => update((d) => (d.worldBible.protagonistWant = v))} />
+            <EndingsEditor endings={wb.candidateEndings ?? []} onChange={(e) => update((d) => (d.worldBible.candidateEndings = e))} />
+          </Collapsible>
+
+          <Panel
+            title={`角色（${draft.personas.length}）`}
+            right={
+              <button className="btn-ghost" onClick={() => update((d) => d.personas.push(blankPersona()))}>
+                <UserPlus className="h-4 w-4" /> 新增角色
+              </button>
+            }
+          >
+            <div className="space-y-3">
+              {draft.personas.map((p, i) => (
+                <PersonaEditor key={p.id} persona={p} onChange={(np) => update((d) => (d.personas[i] = np))} onRemove={() => update((d) => d.personas.splice(i, 1))} />
+              ))}
+            </div>
+          </Panel>
+        </>
+      )}
+
+      {/* W2-b 地点 / W3-b 势力 抽屉（共享） */}
+      <LocationDrawer loc={locFor} locations={plan?.locations ?? []} onClose={() => setLocFor(null)} onPickLocation={setLocFor} />
+      <CharacterDrawer card={charFor} onClose={() => setCharFor(null)} />
+      <FactionDrawer
+        fac={facFor}
+        factions={plan?.factions ?? []}
+        locations={plan?.locations ?? []}
+        onPickFaction={setFacFor}
+        onPickLocation={(l) => { setFacFor(null); setLocFor(l); }}
+        onClose={() => setFacFor(null)}
+      />
+    </div>
+  );
+}
+
+function blankPersona(): Persona {
+  return { id: uid('persona'), name: '新角色', want: '', values: [], fatalFlaw: '', obstacles: [], costThreshold: '', voice: '', mannerisms: [], motifObjects: [], arcState: '', costLedger: [] };
+}
+
+function Text({ label, value, onChange, disabled }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  return (
+    <label className="mb-3 block">
+      <span className="mb-1 block text-xs font-medium text-zinc-500">{label}</span>
+      <input className="input disabled:opacity-60" value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+}
+
+function ListEditor({ label, items, onChange, disabled }: { label: string; items: string[]; onChange: (i: string[]) => void; disabled?: boolean }) {
+  const [val, setVal] = useState('');
+  return (
+    <div className="mb-3">
+      <span className="mb-1 block text-xs font-medium text-zinc-500">{label}</span>
+      <div className="mb-1.5 flex flex-wrap gap-1.5">
+        {items.map((it, i) => (
+          <span key={i} className="chip bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            {it}
+            {!disabled && (
+              <button className="ml-1 text-zinc-400 hover:text-rose-500" onClick={() => onChange(items.filter((_, j) => j !== i))}>
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {items.length === 0 && <span className="text-xs text-zinc-400">（空）</span>}
+      </div>
+      {!disabled && (
+        <div className="flex gap-2">
+          <input className="input" placeholder="添加一条…" value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && val.trim()) { onChange([...items, val.trim()]); setVal(''); } }} />
+          <button className="btn-ghost border border-zinc-200 dark:border-zinc-800" onClick={() => { if (val.trim()) { onChange([...items, val.trim()]); setVal(''); } }}>
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EndingsEditor({ endings, onChange }: { endings: Ending[]; onChange: (e: Ending[]) => void }) {
+  return (
+    <div className="mt-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs font-medium text-zinc-500">候选结局（每个带 activeWeight）</span>
+        <button className="btn-ghost" onClick={() => onChange([...endings, { id: uid('end'), summary: '新结局', themeExpression: '', requiredConditions: [], activeWeight: 0.3 }])}>
+          <Plus className="h-4 w-4" /> 加结局
+        </button>
+      </div>
+      {endings.map((e, i) => (
+        <div key={e.id} className="mb-2 rounded-lg border border-zinc-200 p-2.5 dark:border-zinc-800">
+          <div className="flex items-center gap-2">
+            <input className="input" value={e.summary} onChange={(ev) => onChange(endings.map((x, j) => (j === i ? { ...x, summary: ev.target.value } : x)))} />
+            <button className="btn-ghost text-rose-500" onClick={() => onChange(endings.filter((_, j) => j !== i))}>
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+          <input className="input mt-1.5 text-sm" placeholder="主题表达" value={e.themeExpression ?? ''} onChange={(ev) => onChange(endings.map((x, j) => (j === i ? { ...x, themeExpression: ev.target.value } : x)))} />
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-xs text-zinc-500">activeWeight</span>
+            <input type="range" min={0} max={1} step={0.05} value={Number(e.activeWeight) || 0} className="flex-1" onChange={(ev) => onChange(endings.map((x, j) => (j === i ? { ...x, activeWeight: Number(ev.target.value) } : x)))} />
+            <span className="w-10 text-right font-mono text-xs">{(Number(e.activeWeight) || 0).toFixed(2)}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PersonaEditor({ persona, onChange, onRemove }: { persona: Persona; onChange: (p: Persona) => void; onRemove: () => void }) {
+  const set = <K extends keyof Persona>(k: K, v: Persona[K]) => onChange({ ...persona, [k]: v });
+  const [vName, setVName] = useState('');
+  return (
+    <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      <div className="mb-2 flex items-center gap-2">
+        <input className="input font-semibold" value={persona.name} onChange={(e) => set('name', e.target.value)} />
+        <button className="btn-ghost text-rose-500" onClick={onRemove}>
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Text label="外在欲望 want" value={persona.want} onChange={(v) => set('want', v)} />
+        <Text label="致命弱点 fatalFlaw" value={persona.fatalFlaw} onChange={(v) => set('fatalFlaw', v)} />
+        <Text label="说话方式 voice" value={persona.voice} onChange={(v) => set('voice', v)} />
+        <Text label="代价阈值 costThreshold" value={persona.costThreshold} onChange={(v) => set('costThreshold', v)} />
+      </div>
+
+      <div className="mt-1">
+        <span className="mb-1 block text-xs font-medium text-zinc-500">珍视之物 values（带权重，可加减）</span>
+        <div className="mb-1.5 space-y-1">
+          {persona.values.map((v, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input className="input flex-1" value={v.name ?? ''} onChange={(e) => set('values', persona.values.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+              <input type="range" min={0} max={1} step={0.05} value={Number(v.weight) || 0} onChange={(e) => set('values', persona.values.map((x, j) => (j === i ? { ...x, weight: Number(e.target.value) } : x)))} />
+              <span className="w-10 text-right font-mono text-xs">{(Number(v.weight) || 0).toFixed(2)}</span>
+              <button className="text-zinc-400 hover:text-rose-500" onClick={() => set('values', persona.values.filter((_, j) => j !== i))}>
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input className="input" placeholder="新增珍视之物…" value={vName} onChange={(e) => setVName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && vName.trim()) { set('values', [...persona.values, { name: vName.trim(), weight: 0.5 }]); setVName(''); } }} />
+          <button className="btn-ghost border border-zinc-200 dark:border-zinc-800" onClick={() => { if (vName.trim()) { set('values', [...persona.values, { name: vName.trim(), weight: 0.5 }]); setVName(''); } }}>
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <ListEditor label="阻碍 obstacles" items={persona.obstacles} onChange={(v) => set('obstacles', v)} />
+        <ListEditor label="习惯动作 mannerisms" items={persona.mannerisms} onChange={(v) => set('mannerisms', v)} />
+      </div>
+    </div>
+  );
+}
