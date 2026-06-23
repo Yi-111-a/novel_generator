@@ -18,8 +18,15 @@
 import type { EngineAdapter } from './EngineAdapter';
 import type {
   ApiConfig,
+  AuthorSheetListItem,
+  AuthorWritingSheet,
   Beat,
   Chapter,
+  ChapterDraft,
+  ContinuationDistillConfig,
+  ContinuationJobStatus,
+  ContinuationSettings,
+  ContinuationStyleDiagnostics,
   ControlAction,
   Dossier,
   Ending,
@@ -29,15 +36,22 @@ import type {
   Persona,
   Project,
   ProjectPlan,
+  ProjectType,
   ReaderKnowledge,
   Scene,
   SeedChatMessage,
   SeedDraft,
   SimEvent,
+  SimulationControlResult,
+  SourceChapter,
+  StoryBibleV2,
+  StoryBibleStatus,
   Thread,
   ToneProfile,
   StyleSkill,
+  WritingSettings,
   WorldState,
+  AcceptedChapter,
   LLMLog,
   GraphData,
 } from '../types';
@@ -65,11 +79,15 @@ export class HttpAdapter implements EngineAdapter {
     return r.ok;
   }
 
+  async listTemplates() {
+    const r = await this.j<{ templates: { id: string; label: string; description: string; world_hints: string[] }[] }>('/templates');
+    return r.templates;
+  }
   listProjects(): Promise<Project[]> {
     return this.j('/projects');
   }
-  createProject(title: string): Promise<Project> {
-    return this.j('/projects', { method: 'POST', body: JSON.stringify({ title }) });
+  createProject(title: string, type: ProjectType = 'original', templateId: string = ''): Promise<Project> {
+    return this.j('/projects', { method: 'POST', body: JSON.stringify({ title, type, templateId }) });
   }
   renameProject(id: string, title: string): Promise<void> {
     return this.j(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) });
@@ -189,6 +207,15 @@ export class HttpAdapter implements EngineAdapter {
   editChapter(projectId: string, chapterId: string, fields: Record<string, unknown>): Promise<{ ok: boolean }> {
     return this.j(`/projects/${projectId}/plan/chapter/${chapterId}`, { method: 'PATCH', body: JSON.stringify(fields) });
   }
+  replanChapter(projectId: string, chapterId: string): Promise<{ ok: boolean }> {
+    return this.j(`/projects/${projectId}/plan/chapter/${chapterId}/replan`, { method: 'POST' });
+  }
+  updateDisclosure(projectId: string, entityId: string, fields: Record<string, unknown>): Promise<{ ok: boolean }> {
+    return this.j(`/projects/${projectId}/plan/disclosures/${entityId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields),
+    });
+  }
   deleteChapter(projectId: string, chapterId: string): Promise<{ ok: boolean }> {
     return this.j(`/projects/${projectId}/plan/chapter/${chapterId}`, { method: 'DELETE' });
   }
@@ -198,7 +225,94 @@ export class HttpAdapter implements EngineAdapter {
     });
   }
 
+  // S1 Author Writing Sheet
+  distillAuthorSheet(projectId: string, text: string, name = '', genre = ''): Promise<{ ok: boolean; sheetId?: number; sheet?: AuthorWritingSheet; styleSkill?: StyleSkill }> {
+    return this.j(`/projects/${projectId}/style/distill`, { method: 'POST', body: JSON.stringify({ text, name, genre }) });
+  }
+  listAuthorSheets(projectId: string): Promise<AuthorSheetListItem[]> {
+    return this.j(`/projects/${projectId}/style/sheets`);
+  }
+  getAuthorSheet(projectId: string, sheetId: number): Promise<AuthorWritingSheet> {
+    return this.j(`/projects/${projectId}/style/sheets/${sheetId}`);
+  }
+  deleteAuthorSheet(projectId: string, sheetId: number): Promise<{ ok: boolean }> {
+    return this.j(`/projects/${projectId}/style/sheets/${sheetId}`, { method: 'DELETE' });
+  }
+  // 续写
+
   // LLM 日志
+  getWritingSettings(projectId: string): Promise<WritingSettings> {
+    return this.j(`/projects/${projectId}/writing/settings`);
+  }
+  saveWritingSettings(projectId: string, settings: Partial<WritingSettings>): Promise<WritingSettings> {
+    return this.j(`/projects/${projectId}/writing/settings`, { method: 'PUT', body: JSON.stringify(settings) });
+  }
+  buildStoryBible(projectId: string): Promise<{ ok: boolean; status: string }> {
+    return this.j(`/projects/${projectId}/story-bible/build`, { method: 'POST' });
+  }
+  getStoryBibleStatus(projectId: string): Promise<StoryBibleStatus> {
+    return this.j(`/projects/${projectId}/story-bible/status`);
+  }
+  getStoryBible(projectId: string): Promise<StoryBibleV2 | null> {
+    return this.j(`/projects/${projectId}/story-bible`);
+  }
+  importSourceText(projectId: string, body: { text: string; filename?: string }): Promise<{ ok: boolean; chapters: number; filename: string }> {
+    return this.j(`/projects/${projectId}/source/import-text`, { method: 'POST', body: JSON.stringify(body) });
+  }
+  importContinuationSources(projectId: string, body: { text: string; filename?: string }): Promise<{ ok: boolean; chapters: number; filename: string }> {
+    return this.j(`/projects/${projectId}/continuation/import`, { method: 'POST', body: JSON.stringify(body) });
+  }
+  getSourceChapters(projectId: string): Promise<SourceChapter[]> {
+    return this.j(`/projects/${projectId}/source/chapters`);
+  }
+  updateSourceChapter(projectId: string, chapterId: number, body: { title?: string; text?: string; summary?: string }): Promise<{ ok: boolean }> {
+    return this.j(`/projects/${projectId}/source/chapters/${chapterId}`, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+  resplitSource(projectId: string): Promise<{ ok: boolean; chapters?: number }> {
+    return this.j(`/projects/${projectId}/source/resplit`, { method: 'POST' });
+  }
+  getContinuationSettings(projectId: string): Promise<ContinuationSettings> {
+    return this.j(`/projects/${projectId}/continuation/settings`);
+  }
+  saveContinuationSettings(projectId: string, body: Partial<ContinuationSettings>): Promise<ContinuationSettings & { ok?: boolean }> {
+    return this.j(`/projects/${projectId}/continuation/settings`, { method: 'PUT', body: JSON.stringify(body) });
+  }
+  startContinuationDistill(projectId: string, body: ContinuationDistillConfig): Promise<{ ok: boolean; jobId?: string }> {
+    return this.j(`/projects/${projectId}/continuation/distill`, { method: 'POST', body: JSON.stringify(body) });
+  }
+  getContinuationJob(projectId: string): Promise<ContinuationJobStatus> {
+    return this.j(`/projects/${projectId}/continuation/job`);
+  }
+  getContinuationStyleDiagnostics(projectId: string): Promise<ContinuationStyleDiagnostics> {
+    return this.j(`/projects/${projectId}/continuation/style-diagnostics`);
+  }
+  lockContinuation(projectId: string): Promise<ContinuationSettings & { ok?: boolean }> {
+    return this.j(`/projects/${projectId}/continuation/lock`, { method: 'POST' });
+  }
+  createChapterDraft(projectId: string, body: { guidance?: string; targetWords?: number; outlineOnly?: boolean; mode?: 'manual' | 'auto' }): Promise<ChapterDraft> {
+    return this.j(`/projects/${projectId}/chapters/drafts`, { method: 'POST', body: JSON.stringify(body) });
+  }
+  getChapterDrafts(projectId: string): Promise<ChapterDraft[]> {
+    return this.j(`/projects/${projectId}/chapters/drafts`);
+  }
+  acceptChapterDraft(projectId: string, draftId: number): Promise<{ ok: boolean; acceptedChapterId: number; chapterNo: number; title: string }> {
+    return this.j(`/projects/${projectId}/chapters/drafts/${draftId}/accept`, { method: 'POST' });
+  }
+  forceAcceptChapterDraft(projectId: string, draftId: number, reason: string): Promise<{ ok: boolean; acceptedChapterId: number; chapterNo: number; title: string; forced: boolean }> {
+    return this.j(`/projects/${projectId}/chapters/drafts/${draftId}/force-accept`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  }
+  rejectChapterDraft(projectId: string, draftId: number): Promise<{ ok: boolean }> {
+    return this.j(`/projects/${projectId}/chapters/drafts/${draftId}/reject`, { method: 'POST' });
+  }
+  autoWriteChapters(projectId: string, body: { chapters?: number; targetWords?: number; guidance?: string }): Promise<{ ok: boolean; draftIds: number[] }> {
+    return this.j(`/projects/${projectId}/chapters/auto-write`, { method: 'POST', body: JSON.stringify(body) });
+  }
+  getAcceptedChapters(projectId: string): Promise<AcceptedChapter[]> {
+    return this.j(`/projects/${projectId}/chapters/accepted`);
+  }
   getLLMLogs(projectId: string, limit = 200, caller?: string): Promise<LLMLog[]> {
     const q = caller ? `?limit=${limit}&caller=${caller}` : `?limit=${limit}`;
     return this.j(`/projects/${projectId}/llm-logs${q}`);
@@ -211,7 +325,7 @@ export class HttpAdapter implements EngineAdapter {
     return this.j(`/projects/${projectId}/graph`);
   }
 
-  control(projectId: string, action: ControlAction): Promise<void> {
+  control(projectId: string, action: ControlAction): Promise<SimulationControlResult> {
     return this.j(`/projects/${projectId}/control`, { method: 'POST', body: JSON.stringify({ action }) });
   }
   injectGodAction(projectId: string, action: GodAction): Promise<void> {

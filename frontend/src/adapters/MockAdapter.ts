@@ -8,6 +8,7 @@ import type {
   Beat,
   Chapter,
   ControlAction,
+  ContinuationStyleDiagnostics,
   Dossier,
   Ending,
   Fact,
@@ -22,6 +23,7 @@ import type {
   SeedChatMessage,
   SeedDraft,
   SimEvent,
+  SimulationControlResult,
   StyleSkill,
   Thread,
   WorldState,
@@ -238,10 +240,20 @@ export class MockAdapter implements EngineAdapter {
     return Boolean(c.llmApiKey && c.baseUrl);
   }
 
+  async listTemplates() {
+    return [
+      {
+        id: 'shuangwen_zhuangbi',
+        label: '爽文 · 装逼打脸系统',
+        description: '《最强装逼打脸系统》一脉：数值系统 + 三声道反差 + 立 flag → 自爆闭环。',
+        world_hints: ['建议给主角带一套数值化系统（黑化值/进度条）'],
+      },
+    ];
+  }
   async listProjects(): Promise<Project[]> {
     return [...engine.slices.values()].map((s) => ({ ...s.project })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
-  async createProject(title: string): Promise<Project> {
+  async createProject(title: string, _type = 'original', _templateId = ''): Promise<Project> {
     const id = uid('proj');
     const project: Project = { id, title: title || '未命名小说', status: 'seeding', createdAt: now(), updatedAt: now() };
     engine.slices.set(id, {
@@ -426,6 +438,12 @@ export class MockAdapter implements EngineAdapter {
     void projectId; void chapterId; void fields; // 离线 Mock 不持久化大纲编辑
     return { ok: true };
   }
+  async replanChapter(): Promise<{ ok: boolean }> {
+    return { ok: true };
+  }
+  async updateDisclosure(): Promise<{ ok: boolean }> {
+    return { ok: true };
+  }
   async deleteChapter(projectId: string, chapterId: string): Promise<{ ok: boolean }> {
     void projectId; void chapterId;
     return { ok: true };
@@ -434,12 +452,100 @@ export class MockAdapter implements EngineAdapter {
     void projectId;
     return { ok: false, section }; // Mock 离线不调 LLM
   }
+  async distillAuthorSheet(_projectId: string, _text: string, _name = '', _genre = '') {
+    return { ok: false as const } as any;
+  }
+  async listAuthorSheets(_projectId: string) { return []; }
+  async getAuthorSheet(_projectId: string, _sheetId: number) { return {} as any; }
+  async deleteAuthorSheet(_projectId: string, _sheetId: number) { return { ok: true }; }
+  async getWritingSettings() { return { targetWords: 6000, minWords: 5400, maxWords: 7200, outlineFirst: false, autoChapterCount: 5, requireHumanAcceptance: true, styleProfileId: null }; }
+  async saveWritingSettings(_projectId: string, settings: any) { return { targetWords: 6000, minWords: 5400, maxWords: 7200, outlineFirst: false, autoChapterCount: 5, requireHumanAcceptance: true, styleProfileId: null, ...settings }; }
+  async buildStoryBible() { return { ok: true, status: 'ready' }; }
+  async getStoryBibleStatus() { return { status: 'ready', type: 'original' as const, pendingDraftId: null, pendingChapterNo: null }; }
+  async getStoryBible() { return null; }
+  async importSourceText(_projectId: string, body: { text: string; filename?: string }) { return { ok: true, chapters: body.text.trim() ? 1 : 0, filename: body.filename || 'source.txt' }; }
+  async importContinuationSources(_projectId: string, body: { text: string; filename?: string }) { return { ok: true, chapters: body.text.trim() ? 1 : 0, filename: body.filename || 'source.txt' }; }
+  async getSourceChapters() { return []; }
+  async updateSourceChapter() { return { ok: true }; }
+  async resplitSource() { return { ok: true, chapters: 0 }; }
+  async getContinuationSettings() {
+    return {
+      sourceTextHash: '',
+      continuationHint: '',
+      seriesId: '',
+      sourceBookTitle: '',
+      currentBookTitle: '',
+      bookIndex: 1,
+      writeMode: 'continue_current_book' as const,
+      chapterStartNo: 1,
+      latestSourceChapterNo: 0,
+      continuationReady: false,
+      continuationPhase: '',
+      timePosition: '',
+      protagonistStrategy: '',
+      inheritUnresolvedThreads: true,
+      experienceLayerEnabled: false,
+      experienceLayerMode: 'essay',
+      experienceSourcePath: '',
+      experienceStyleLevel: 'high',
+      activeLifeModelId: '',
+    };
+  }
+  async saveContinuationSettings(_projectId: string, body: any) { return { ...(await this.getContinuationSettings()), ...body, ok: true }; }
+  async startContinuationDistill() { return { ok: true, jobId: 'mock-job' }; }
+  async getContinuationJob() {
+    return {
+      status: 'done',
+      progress: 7,
+      total: 7,
+      currentStep: 'B7',
+      steps: [
+        { code: 'B1', label: '导入分章', status: 'done' as const },
+        { code: 'B2', label: '世界书', status: 'done' as const },
+        { code: 'B3', label: '人物地点势力', status: 'done' as const },
+        { code: 'B4', label: '系列状态', status: 'done' as const },
+        { code: 'B5', label: '图谱', status: 'done' as const },
+        { code: 'B6', label: '文风', status: 'done' as const },
+        { code: 'B7', label: '快照', status: 'done' as const },
+      ],
+    };
+  }
+  async getContinuationStyleDiagnostics(): Promise<ContinuationStyleDiagnostics> {
+    return {
+      corpus: {
+        segmentCount: 0,
+        clusterCount: 0,
+        negativeSampleCount: 0,
+        discourseCoverage: {},
+        voiceCoverage: {},
+        sceneCoverage: {},
+        lowConfidenceSegments: [],
+        clusters: [],
+      },
+      latestDraft: null,
+    };
+  }
+  async lockContinuation() { return { ...(await this.getContinuationSettings()), continuationReady: true, ok: true }; }
+  async createChapterDraft() { return { id: 0, chapterNo: 1, title: '', outline: '', prose: '', guidance: '', targetWords: 6000, mode: 'manual' as const, status: 'draft' as const, contextSnapshot: {}, candidateGroupId: '', stylePacket: {}, scoreBreakdown: {}, retrievedSegmentIds: [], revisionHistory: [], createdAt: '' }; }
+  async getChapterDrafts() { return []; }
+  async acceptChapterDraft() { return { ok: true, acceptedChapterId: 0, chapterNo: 1, title: '' }; }
+  async forceAcceptChapterDraft() { return { ok: true, acceptedChapterId: 0, chapterNo: 1, title: '', forced: true }; }
+  async rejectChapterDraft() { return { ok: true }; }
+  async autoWriteChapters() { return { ok: true, draftIds: [] }; }
+  async getAcceptedChapters() { return []; }
 
-  async control(projectId: string, action: ControlAction): Promise<void> {
+  async control(projectId: string, action: ControlAction): Promise<SimulationControlResult> {
     const slice = engine.get(projectId);
     if (action === 'play') engine.startTimer(slice);
     else if (action === 'pause') engine.stopTimer(slice);
     else if (action === 'step') engine.stepOnce(slice);
+    return {
+      ok: true,
+      runningSim: slice.project.runningSim ?? false,
+      pendingDraftId: null,
+      pendingChapterNo: null,
+      autoPausedReason: null,
+    };
   }
   async injectGodAction(projectId: string, action: GodAction): Promise<void> {
     const rt = this.rt(projectId);

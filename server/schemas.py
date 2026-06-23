@@ -9,6 +9,7 @@ from typing import Any
 
 from novel_engine.models import (
     Arc,
+    AuthorWritingSheet,
     Beat,
     ChapterPlan,
     Ending,
@@ -22,6 +23,8 @@ from novel_engine.models import (
     ReaderKnowledge,
     RevealNode,
     Scene,
+    SceneAnchor,
+    StyleClaim,
     Thread,
 )
 
@@ -120,6 +123,19 @@ def scene_out(s: Scene) -> dict[str, Any]:
     }
 
 
+def scene_anchor_out(a: SceneAnchor) -> dict[str, Any]:
+    return {
+        "sceneId": a.scene_id,
+        "name": a.name,
+        "kind": a.kind,
+        "locationId": a.location_id,
+        "canonicalFacts": a.canonical_facts,
+        "aliases": a.aliases,
+        "establishedChapter": a.established_chapter,
+        "createdAt": a.created_at,
+    }
+
+
 def ending_out(e: Ending) -> dict[str, Any]:
     return {
         "id": e.ending_id,
@@ -130,11 +146,12 @@ def ending_out(e: Ending) -> dict[str, Any]:
     }
 
 
-def persona_out(p: Persona) -> dict[str, Any]:
+def persona_out(p: Persona, display_name: str | None = None) -> dict[str, Any]:
     # 引擎 cost_threshold/arc_state 是 dict；前端契约是 string → 友好地拍平展示。
     return {
         "id": p.agent_id,
         "name": p.name,
+        "displayName": display_name or p.name,
         "want": p.want,
         "values": p.values,
         "fatalFlaw": p.fatal_flaw,
@@ -190,6 +207,7 @@ def chapter_plan_out(c: ChapterPlan, names: dict[str, str] | None = None) -> dic
         "availableItems": c.available_items,
         "beatGoals": c.beat_goals,
         "revealGate": c.reveal_gate,
+        "threadDecisions": c.thread_decisions_json,
         "targetScenes": c.target_scenes,
         "role": c.role,
         "targetTension": c.target_tension,
@@ -204,7 +222,7 @@ def chapter_plan_out(c: ChapterPlan, names: dict[str, str] | None = None) -> dic
     }
 
 
-def character_card_out(c) -> dict[str, Any]:
+def character_card_out(c, display_name: str | None = None) -> dict[str, Any]:
     """§1 选角层身份卡 + W4 三维度 序列化。"""
     return {
         "cardId": c.card_id,
@@ -212,6 +230,7 @@ def character_card_out(c) -> dict[str, Any]:
         "tier": c.tier,
         "slotKey": c.slot_key,
         "name": c.name,
+        "displayName": display_name or c.name,
         "oneLiner": c.one_liner,
         "voiceRegister": c.voice_register,
         "definingTrait": c.defining_trait,
@@ -225,6 +244,11 @@ def character_card_out(c) -> dict[str, Any]:
         "appearance": getattr(c, "appearance", ""),
         "socialRole": getattr(c, "social_role", ""),
         "psychology": getattr(c, "psychology", ""),
+        "foreshadowFrom": getattr(c, "foreshadow_from", 0),
+        "revealChapter": getattr(c, "reveal_chapter", 0),
+        "secretRevealChapter": getattr(c, "secret_reveal_chapter", 0),
+        "foreshadowHint": getattr(c, "foreshadow_hint", ""),
+        "secretTruth": getattr(c, "secret_truth", ""),
     }
 
 
@@ -245,6 +269,11 @@ def faction_out(f) -> dict[str, Any]:
         "summary": f.summary,
         "detail": f.detail,
         "source": f.source,
+        "foreshadowFrom": getattr(f, "foreshadow_from", 0),
+        "revealChapter": getattr(f, "reveal_chapter", 0),
+        "secretRevealChapter": getattr(f, "secret_reveal_chapter", 0),
+        "foreshadowHint": getattr(f, "foreshadow_hint", ""),
+        "secretTruth": getattr(f, "secret_truth", ""),
     }
 
 
@@ -263,6 +292,11 @@ def location_out(l) -> dict[str, Any]:
         "cultureLocal": getattr(l, "culture_local", ""),
         "summary": getattr(l, "summary", ""),
         "detail": getattr(l, "detail", ""),
+        "foreshadowFrom": getattr(l, "foreshadow_from", 0),
+        "revealChapter": getattr(l, "reveal_chapter", 0),
+        "secretRevealChapter": getattr(l, "secret_reveal_chapter", 0),
+        "foreshadowHint": getattr(l, "foreshadow_hint", ""),
+        "secretTruth": getattr(l, "secret_truth", ""),
     }
 
 
@@ -325,6 +359,24 @@ def inventory_out(i: InventoryItem, name: str = "") -> dict[str, Any]:
         "status": i.status,
         "acquiredChapter": i.acquired_chapter,
         "note": i.note,
+    }
+
+
+def _claim_out(c: StyleClaim) -> dict[str, str]:
+    return {"claim": c.claim, "evidence": c.evidence, "sourceChapter": c.source_chapter}
+
+
+def author_sheet_out(s: AuthorWritingSheet) -> dict[str, Any]:
+    """S1 Author Writing Sheet 序列化（四维 Claim-Evidence）。"""
+    return {
+        "name": s.name,
+        "sourceGenre": s.source_genre,
+        "plot": [_claim_out(c) for c in s.plot],
+        "creativity": [_claim_out(c) for c in s.creativity],
+        "development": [_claim_out(c) for c in s.development],
+        "language": [_claim_out(c) for c in s.language],
+        "personaMd": s.persona_md,
+        "nSegments": s.n_segments,
     }
 
 

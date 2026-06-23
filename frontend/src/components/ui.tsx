@@ -36,8 +36,10 @@ const STATUS_META: Record<ProjectStatus, { label: string; cls: string }> = {
   completed: { label: '已完成', cls: 'bg-indigo-500/15 text-indigo-400' },
 };
 
+const UNKNOWN_STATUS_META = { label: '未知', cls: 'bg-zinc-500/15 text-zinc-500' };
+
 export function StatusBadge({ status }: { status: ProjectStatus }) {
-  const m = STATUS_META[status];
+  const m = STATUS_META[status] ?? UNKNOWN_STATUS_META;
   return <span className={cn('chip', m.cls)}>{m.label}</span>;
 }
 

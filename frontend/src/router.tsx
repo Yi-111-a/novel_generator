@@ -1,6 +1,7 @@
-import { createBrowserRouter, Navigate } from 'react-router-dom';
-import { ErrorPage, ProjectLayout, RootLayout } from './components/Layouts';
+import { createBrowserRouter } from 'react-router-dom';
+import { ErrorPage, ProjectHomeRedirect, ProjectLayout, RootLayout } from './components/Layouts';
 import { Dashboard } from './views/Dashboard';
+import { ContinuationWorkshop } from './views/ContinuationWorkshop';
 import { LedgerInspector } from './views/LedgerInspector';
 import { Outline } from './views/Outline';
 import { Reading } from './views/Reading';
@@ -23,7 +24,8 @@ export const router = createBrowserRouter([
         element: <ProjectLayout />,
         errorElement: <ErrorPage />,
         children: [
-          { index: true, element: <Navigate to="seed" replace /> },
+          { index: true, element: <ProjectHomeRedirect /> },
+          { path: 'continuation', element: <ContinuationWorkshop /> },
           { path: 'seed', element: <SeedWorkshop /> },
           { path: 'world', element: <WorldConfig /> },
           { path: 'outline', element: <Outline /> },

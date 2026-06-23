@@ -1,10 +1,11 @@
-import { BookMarked, Boxes, KeyRound, Lock, Palette, Pencil, Trash2, Unlock, UserRound, X } from 'lucide-react';
+import { BookMarked, Boxes, KeyRound, Lock, Palette, Pencil, Play, RotateCcw, Settings2, Trash2, Unlock, UserRound, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { getAdapter } from '../adapters';
 import { SeedingGate, useProjectCtx } from '../components/Layouts';
+import { AuthorSheetPanel } from '../components/AuthorSheetPanel';
 import { StyleSkillPanel } from '../components/StyleSkillPanel';
 import { Empty } from '../components/ui';
-import type { Persona, PlanChapter, ProjectPlan } from '../types';
+import type { Persona, PlanChapter, ProjectPlan, WritingSettings } from '../types';
 
 
 const STATUS_CHIP: Record<string, string> = {
@@ -21,6 +22,12 @@ const ROLE_CHIP: Record<string, string> = {
   climax: 'bg-rose-500/15 text-rose-400',
   resolution: 'bg-emerald-500/15 text-emerald-400',
 };
+const THREAD_DECISION_LABEL: Record<string, string> = { reveal: '揭', hint: '暗', hide: '藏' };
+const THREAD_DECISION_CHIP: Record<string, string> = {
+  reveal: 'bg-emerald-500/15 text-emerald-400',
+  hint: 'bg-amber-500/15 text-amber-500',
+  hide: 'bg-zinc-500/15 text-zinc-400',
+};
 
 export function Outline() {
   const { project } = useProjectCtx();
@@ -29,6 +36,9 @@ export function Outline() {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [dossierFor, setDossierFor] = useState<string | null>(null);
   const [dossierMd, setDossierMd] = useState('');
+  const [writingSettings, setWritingSettings] = useState<WritingSettings | null>(null);
+  const [writingBusy, setWritingBusy] = useState<'save' | 'auto' | ''>('');
+  const [writingMessage, setWritingMessage] = useState('');
 
   useEffect(() => {
     if (project.status === 'seeding') return;
@@ -37,6 +47,7 @@ export function Outline() {
       adapter.getPlan(project.id).then((p) => alive && setPlan(p)).catch(() => {});
       adapter.getPersonas(project.id).then((p) => alive && setPersonas(p)).catch(() => {});
     };
+    adapter.getWritingSettings(project.id).then((settings) => alive && setWritingSettings(settings)).catch(() => {});
     pull();
     const id = window.setInterval(pull, 5000);
     return () => {
@@ -46,7 +57,7 @@ export function Outline() {
   }, [project.id, project.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nameOf = useMemo(() => {
-    const m = Object.fromEntries(personas.map((p) => [p.id, p.name]));
+    const m = Object.fromEntries(personas.map((p) => [p.id, p.displayName || p.name]));
     return (id?: string | null) => (id ? m[id] ?? id : '—');
   }, [personas]);
 
@@ -117,11 +128,67 @@ export function Outline() {
       .catch(() => alert('删除失败'))
       .finally(() => setBusy(false));
   };
+  const replanChapter = (c: PlanChapter) => {
+    if (!window.confirm(`重新规划第${c.sequenceOrder}章？当前未写大纲会被刷新。`)) return;
+    setBusy(true);
+    adapter.replanChapter(project.id, c.chapterId)
+      .then(refreshPlan)
+      .catch(() => alert('重新规划失败；续写运行时临时章可能不支持此入口'))
+      .finally(() => setBusy(false));
+  };
 
   const openDossier = (agentId: string) => {
     setDossierFor(agentId);
     setDossierMd('载入中…');
     adapter.getDossier(project.id, agentId).then((d) => setDossierMd(d.markdown || '（暂无档案）')).catch(() => setDossierMd('载入失败'));
+  };
+
+  const saveWritingSettings = async () => {
+    if (!writingSettings) return;
+    setWritingBusy('save');
+    setWritingMessage('');
+    try {
+      const next = await adapter.saveWritingSettings(project.id, writingSettings);
+      setWritingSettings(next);
+      setWritingMessage('写作设置已保存');
+    } catch {
+      setWritingMessage('写作设置保存失败');
+    } finally {
+      setWritingBusy('');
+    }
+  };
+
+  const startAutoWriting = async () => {
+    if (!writingSettings) return;
+    setWritingBusy('auto');
+    setWritingMessage('');
+    try {
+      const drafts = await adapter.getChapterDrafts(project.id);
+      const activeDraft = drafts.find((draftRow) =>
+        draftRow.status === 'pending_acceptance' || draftRow.status === 'blocked'
+      );
+      if (activeDraft) {
+        setWritingMessage(`第 ${activeDraft.chapterNo} 章仍待处理，请先到“阅读”页审批或重写`);
+        return;
+      }
+      const saved = await adapter.saveWritingSettings(project.id, writingSettings);
+      setWritingSettings(saved);
+      const result = await adapter.autoWriteChapters(project.id, {
+        chapters: saved.autoChapterCount,
+        targetWords: saved.targetWords,
+      });
+      const generated = result.draftIds.length;
+      setWritingMessage(
+        saved.requireHumanAcceptance
+          ? `已生成 ${generated} 章并暂停，前往“阅读”页审批`
+          : `自动写作完成，共生成并确认 ${generated} 章`,
+      );
+      await refreshPlan();
+    } catch {
+      setWritingMessage('自动写作启动失败，请检查是否已有待审批草稿');
+    } finally {
+      setWritingBusy('');
+    }
   };
 
   if (project.status === 'seeding') return <SeedingGate />;
@@ -134,8 +201,94 @@ export function Outline() {
       </Empty>
     );
 
+  // 续写项目：多级大纲（Parts → Arcs → Chapters，C3 预生成）
+  if ((plan as any).continuation) {
+    const parts = ((plan as any).parts ?? []).slice().sort((a: any, b: any) => a.sequenceOrder - b.sequenceOrder);
+    const arcsAll = ((plan as any).arcs ?? []) as any[];
+    const chs = (plan.chapters ?? []).slice().sort((a: any, b: any) => a.sequenceOrder - b.sequenceOrder);
+    const chaptersByArc = (arcId: string) => chs.filter((c: any) => c.arcId === arcId || c.arc_id === arcId);
+    const arcsByPart = (partId: string) => arcsAll
+      .filter((a: any) => a.partId === partId)
+      .sort((a: any, b: any) => a.sequenceOrder - b.sequenceOrder);
+
+    // 计数
+    const totalChs = chs.length;
+    const writtenChs = chs.filter((c: any) => c.written).length;
+
+    return (
+      <div className="space-y-4">
+        <h2 className="flex items-center gap-2 text-lg font-semibold">
+          <BookMarked className="h-5 w-5 text-indigo-400" /> 续写全书大纲
+          <span className="ml-2 text-xs font-normal text-zinc-500">
+            {parts.length} 部 · {arcsAll.length} 小部 · {totalChs} 章（已写 {writtenChs}）
+          </span>
+        </h2>
+        {parts.length === 0 && totalChs === 0 && (
+          <Empty>暂无预生成大纲。请先完成蒸馏锁定（蒸馏 B5 会写入大纲）。</Empty>
+        )}
+        {parts.length === 0 && totalChs > 0 && (
+          /* 兼容旧扁平模式 */
+          <div className="space-y-2">
+            {chs.map((c: any) => (
+              <ContinuationChapterCard key={c.chapterId} c={c} />
+            ))}
+          </div>
+        )}
+        {parts.map((part: any) => {
+          const partArcs = arcsByPart(part.partId);
+          return (
+            <section key={part.partId} className="panel p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold">第{part.sequenceOrder}部 · {part.title}</span>
+                {part.region && <span className="chip bg-sky-500/15 text-sky-400">地域：{part.region}</span>}
+                <span className="chip bg-zinc-500/15 text-zinc-400">{partArcs.length} 小部</span>
+              </div>
+              {part.goal && <p className="mt-1 text-xs text-zinc-500">目标：{part.goal}</p>}
+              {partArcs.map((arc: any) => {
+                const arcChs = chaptersByArc(arc.arcId).sort((a: any, b: any) => a.sequenceOrder - b.sequenceOrder);
+                return (
+                  <div key={arc.arcId} className="mt-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{arc.title || `小部分 ${arc.sequenceOrder}`}</span>
+                      <span className="chip bg-zinc-500/15 text-zinc-400">{arcChs.length}/{arc.targetChapters} 章</span>
+                      {(arc.focusAgents ?? []).length > 0 && (
+                        <span className="text-xs text-zinc-500">
+                          焦点：{arc.focusAgents.map((f: any) => f.name).filter(Boolean).join('、')}
+                        </span>
+                      )}
+                    </div>
+                    {arc.summary && <p className="mt-1 text-xs text-zinc-500">{arc.summary}</p>}
+                    <ol className="mt-2 space-y-1.5">
+                      {arcChs.map((c: any) => (
+                        <li key={c.chapterId}><ContinuationChapterCard c={c} compact /></li>
+                      ))}
+                    </ol>
+                  </div>
+                );
+              })}
+            </section>
+          );
+        })}
+        {((plan as any).storyArcsOriginal ?? plan.storyArcs ?? []).length > 0 && (
+          <div className="panel p-3">
+            <div className="mb-1 text-sm font-semibold">原作剧情主线（蒸馏结果·供参考）</div>
+            <ul className="space-y-1 text-xs">
+              {(((plan as any).storyArcsOriginal ?? plan.storyArcs) ?? []).map((a: any) => (
+                <li key={a.arc_id}>
+                  <span className="font-medium">{a.name}</span>
+                  <span className="ml-2 text-zinc-500">[{a.resolution_status ?? a.resolution}]</span>
+                  {(a.journey_summary || a.journey) && <span className="ml-2 text-zinc-600 dark:text-zinc-400">{a.journey_summary ?? a.journey}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const chaptersByArc = (arcId: string): PlanChapter[] =>
-    plan.chapters.filter((c) => c.arcId === arcId).sort((a, b) => a.sequenceOrder - b.sequenceOrder);
+    plan.chapters.filter((c: any) => c.arcId === arcId).sort((a: any, b: any) => a.sequenceOrder - b.sequenceOrder);
 
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_320px]">
@@ -179,7 +332,7 @@ export function Outline() {
                     <span className="chip bg-zinc-500/15 text-zinc-400">目标 {arc.targetChapters} 章</span>
                     {arc.focusAgents?.length > 0 && (
                       <span className="text-xs text-zinc-500">
-                        焦点：{arc.focusAgents.map((f) => `${nameOf(f.agentId)}(${f.weight})`).join('、')}
+                        焦点：{arc.focusAgents.map((f: any) => `${nameOf(f.agentId)}(${f.weight})`).join('、')}
                       </span>
                     )}
                   </div>
@@ -200,6 +353,15 @@ export function Outline() {
                           {c.revealGate.length > 0 && (
                             <span className="chip bg-amber-500/15 text-amber-500">含揭示</span>
                           )}
+                          {(c.threadDecisions ?? []).slice(0, 4).map((d: any) => (
+                            <span
+                              key={`${c.chapterId}-${d.threadId}-${d.decision}`}
+                              className={`chip ${THREAD_DECISION_CHIP[d.decision] ?? THREAD_DECISION_CHIP.hide}`}
+                              title={`${d.question || ''}${d.reason ? `｜${d.reason}` : ''}`}
+                            >
+                              {THREAD_DECISION_LABEL[d.decision] ?? d.decision}
+                            </span>
+                          ))}
                           {c.provisional && (
                             <span className="chip bg-zinc-500/15 text-zinc-400" title="尚未演到，演到时会按已发生的事实复核">预演稿</span>
                           )}
@@ -210,11 +372,18 @@ export function Outline() {
                                 <Lock className="mr-0.5 inline h-3 w-3" />已锁定
                               </span>
                             ) : (
-                              <button onClick={() => (editId === c.chapterId ? setEditId(null) : startEdit(c))}
-                                className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-indigo-500 dark:hover:bg-zinc-800"
-                                title="编辑本章大纲">
-                                <Pencil className="h-3.5 w-3.5" />
-                              </button>
+                              <>
+                                <button onClick={() => replanChapter(c)} disabled={busy}
+                                  className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-amber-500 disabled:opacity-40 dark:hover:bg-zinc-800"
+                                  title="按当前安全上下文重新规划本章">
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                </button>
+                                <button onClick={() => (editId === c.chapterId ? setEditId(null) : startEdit(c))}
+                                  className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-indigo-500 dark:hover:bg-zinc-800"
+                                  title="编辑本章大纲">
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                              </>
                             )}
                             <button onClick={() => delChapter(c)} disabled={busy}
                               className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-rose-500 disabled:opacity-40 dark:hover:bg-zinc-800"
@@ -303,6 +472,80 @@ export function Outline() {
 
       {/* 右：文风契约 + 揭示链 + 库存 + 人物档案 */}
       <div className="space-y-5">
+        {writingSettings && (
+          <section className="panel p-4">
+            <h3 className="flex items-center gap-2 text-sm font-semibold">
+              <Settings2 className="h-4 w-4 text-cyan-400" /> 写作设置
+            </h3>
+            <div className="mt-3 space-y-3 text-sm">
+              <label className="block">
+                <div className="mb-1 text-zinc-500">每章目标字数</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={500}
+                  step={100}
+                  value={writingSettings.targetWords}
+                  onChange={(e) => setWritingSettings({
+                    ...writingSettings,
+                    targetWords: Math.max(500, Number(e.target.value) || 500),
+                  })}
+                />
+              </label>
+              <label className="block">
+                <div className="mb-1 text-zinc-500">自动连写章数</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={writingSettings.autoChapterCount}
+                  onChange={(e) => setWritingSettings({
+                    ...writingSettings,
+                    autoChapterCount: Math.min(50, Math.max(1, Number(e.target.value) || 1)),
+                  })}
+                />
+              </label>
+              <label className="flex items-start gap-2 text-zinc-600 dark:text-zinc-300">
+                <input
+                  className="mt-0.5"
+                  type="checkbox"
+                  checked={writingSettings.requireHumanAcceptance}
+                  onChange={(e) => setWritingSettings({
+                    ...writingSettings,
+                    requireHumanAcceptance: e.target.checked,
+                  })}
+                />
+                <span>
+                  每章都需要人工审批
+                  <span className="mt-0.5 block text-xs text-zinc-500">
+                    开启后每写一章就暂停；关闭后按设定章数连续生成并自动确认。
+                  </span>
+                </span>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className="btn-ghost border border-zinc-200 dark:border-zinc-800"
+                  onClick={saveWritingSettings}
+                  disabled={writingBusy !== ''}
+                >
+                  {writingBusy === 'save' ? '保存中…' : '保存设置'}
+                </button>
+                <button
+                  className="btn-primary"
+                  onClick={startAutoWriting}
+                  disabled={writingBusy !== ''}
+                >
+                  <Play className="h-4 w-4" />
+                  {writingBusy === 'auto' ? '写作中…' : '开始自动写'}
+                </button>
+              </div>
+              {writingMessage && (
+                <p className="text-xs leading-5 text-zinc-500">{writingMessage}</p>
+              )}
+            </div>
+          </section>
+        )}
         {plan.toneProfile && (
           <section className="panel p-4">
             <h3 className="flex items-center gap-2 text-sm font-semibold">
@@ -368,6 +611,7 @@ export function Outline() {
         )}
 
         <StyleSkillPanel projectId={project.id} />
+        <AuthorSheetPanel projectId={project.id} />
 
 
         <section className="panel p-4">
@@ -425,7 +669,7 @@ export function Outline() {
                 onClick={() => openDossier(p.id)}
                 className="chip bg-zinc-500/15 text-zinc-500 hover:bg-violet-500/15 hover:text-violet-400"
               >
-                {p.name}
+                {p.displayName || p.name}
               </button>
             ))}
           </div>
@@ -453,6 +697,73 @@ export function Outline() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ContinuationChapterCard({ c, compact }: { c: any; compact?: boolean }) {
+  return (
+    <div className={compact ? '' : 'panel p-3'}>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="font-semibold">第{c.sequenceOrder}章{c.title ? ` · ${c.title}` : ''}</span>
+        {c.written && <span className="chip bg-emerald-500/20 text-emerald-500">已写</span>}
+        {c.povName && <span className="chip bg-indigo-500/15 text-indigo-400">POV：{c.povName}</span>}
+        {c.locationName && <span className="chip bg-teal-500/15 text-teal-400">{c.locationName}</span>}
+        {(c.castNames ?? []).length > 0 && (
+          <span className="chip bg-zinc-500/15 text-zinc-400">{(c.castNames ?? []).length} 人</span>
+        )}
+      </div>
+      {c.dramaticQuestion && <p className="mt-1 text-xs text-amber-500">戏剧问题：{c.dramaticQuestion}</p>}
+      {c.exitState && <p className="mt-1 text-xs text-zinc-500">章末出口：{c.exitState}</p>}
+      <ThreadDecisionStrip decisions={c.threadDecisions ?? []} compact={compact} />
+      {(c.beatGoals ?? []).length > 0 && (
+        <ol className="mt-1.5 space-y-0.5 pl-4 text-xs text-zinc-600 dark:text-zinc-400" style={{ listStyle: 'decimal' }}>
+          {c.beatGoals.map((b: string, i: number) => <li key={i}>{b}</li>)}
+        </ol>
+      )}
+      {(c.castNames ?? []).length > 0 && (
+        <p className="mt-1 text-[11px] text-zinc-500">出场：{c.castNames.join('、')}</p>
+      )}
+    </div>
+  );
+}
+
+function ThreadDecisionStrip({ decisions, compact }: { decisions: any[]; compact?: boolean }) {
+  const list = (decisions ?? []).filter(Boolean);
+  if (list.length === 0) return null;
+  const shown = list.slice(0, compact ? 3 : 5);
+  const count = (kind: string) => list.filter((d) => d.decision === kind).length;
+
+  return (
+    <div className={`${compact ? 'mt-1' : 'mt-2'} space-y-1 text-[11px]`}>
+      <div className="flex flex-wrap items-center gap-1.5 text-zinc-500">
+        <span className="font-medium text-zinc-600 dark:text-zinc-300">悬念调度</span>
+        {(['reveal', 'hint', 'hide'] as const).map((kind) => {
+          const n = count(kind);
+          if (!n) return null;
+          return (
+            <span key={kind} className={`chip ${THREAD_DECISION_CHIP[kind]}`}>
+              {THREAD_DECISION_LABEL[kind]} {n}
+            </span>
+          );
+        })}
+      </div>
+      <ul className="space-y-0.5 text-zinc-600 dark:text-zinc-400">
+        {shown.map((d, i) => (
+          <li key={`${d.threadId ?? i}-${d.decision ?? 'hide'}`} className="flex gap-1.5 leading-relaxed">
+            <span className={`mt-0.5 h-4 shrink-0 rounded px-1 text-[10px] leading-4 ${THREAD_DECISION_CHIP[d.decision] ?? THREAD_DECISION_CHIP.hide}`}>
+              {THREAD_DECISION_LABEL[d.decision] ?? d.decision ?? '藏'}
+            </span>
+            <span className="min-w-0">
+              <span className="text-zinc-700 dark:text-zinc-300">{d.question || '未命名悬念'}</span>
+              {d.reason && <span className="text-zinc-500">｜{d.reason}</span>}
+            </span>
+          </li>
+        ))}
+        {list.length > shown.length && (
+          <li className="text-zinc-400">另有 {list.length - shown.length} 条隐藏调度</li>
+        )}
+      </ul>
     </div>
   );
 }
