@@ -11,13 +11,14 @@ import time
 import urllib.request
 
 BASE = "http://localhost:8000/api"
+BUILD_TIMEOUT_SECONDS = 1800
 
 
 def call(method, path, body=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
+    with urllib.request.urlopen(req, timeout=BUILD_TIMEOUT_SECONDS) as r:
         return json.loads(r.read().decode("utf-8"))
 
 

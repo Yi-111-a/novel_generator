@@ -11,6 +11,7 @@ import time
 import urllib.request
 
 BASE = "http://localhost:8000/api"
+BUILD_TIMEOUT_SECONDS = 1800
 
 
 def call(method, path, body=None, timeout=120):
@@ -101,10 +102,10 @@ def main():
     if not ready:
         print("   缺项：", [c["label"] for c in draft["completeness"]["checklist"] if not c["done"]])
         sys.exit(1)
-    print("[3] 锁定并生成（全量章纲 ~10min+，HTTP 可能超时但服务端会继续跑完）…")
+    print("[3] 锁定并生成（最多等待 30min；中断后可按构建断点续跑）…")
     t0 = time.time()
     try:
-        call("POST", f"/projects/{pid}/seed/lock", timeout=1200)
+        call("POST", f"/projects/{pid}/seed/lock", timeout=BUILD_TIMEOUT_SECONDS)
         print(f"   锁定完成，用时 {time.time()-t0:.0f}s")
     except Exception as e:
         print(f"   HTTP 超时/中断（{e}）——服务端 worker 仍在后台生成，稍后刷新前端即可。")
