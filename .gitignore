@@ -18,18 +18,15 @@ venv/
 
 # Data / runtime
 server/.data/
-scripts/_*
-scripts/*.log
-scripts/*.txt
-scripts/_*.json
-scripts/out_*.txt
-scripts/seed*.log
-scripts/read*.txt
-scripts/first5.txt
-scripts/plan_dump.json
-scripts/plan_v*.json
-scripts/yunhai_v*.json
-scripts/.zhutian_new_pid
+
+# scripts/：只跟踪展示性脚本，其余(一次性/项目专属/转储/运维)一律不入库。
+# 新增要入库的脚本，在此加一行白名单 !scripts/<name>.py
+scripts/*
+!scripts/eval_harness.py
+!scripts/measure_cache.py
+!scripts/verify_w0_w5.py
+!scripts/verify_w2_w3.py
+!scripts/run_demo.py
 
 # Generated novel artifacts / runtime output
 outputs/
