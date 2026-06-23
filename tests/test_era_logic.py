@@ -39,15 +39,7 @@ def test_era_logic_defaults_empty_when_unset():
     assert r.get_tone_profile().era_logic == {}
 
 
-# ---- 注入 tone_profile_prompt（覆盖 agent+narrator 两端）----
-def test_prompt_injects_wall_when_enabled():
-    r = Repository(db.connect(":memory:"))
-    r.set_tone_profile(ToneProfile(genre="tragedy", register="典雅", era_logic=_era()))
-    block = r.tone_profile_prompt()
-    assert "时代/语境隔离墙" in block
-    assert "心理学" in block and "神罚" in block
-
-
+# ---- 注入 tone_profile_prompt（隔离墙仅做事后闸门，不写进提示词）----
 def test_prompt_no_wall_when_disabled():
     r = Repository(db.connect(":memory:"))
     r.set_tone_profile(ToneProfile(genre="mystery", register="冷静", era_logic=_era(enabled=False)))

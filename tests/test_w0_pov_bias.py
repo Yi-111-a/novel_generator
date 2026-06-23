@@ -30,13 +30,13 @@ def test_pov_lead_defaults_to_hero():
         assert ok and lead == "hero", (seq, lead)
 
 
-def test_pov_lead_supporting_every_fourth():
+def test_pov_lead_locks_hero_every_chapter():
+    # 旧版每全书第 4/8/12 章轮配角主讲；f97f1e8 起改为「全程锁主角视角」纪律，
+    # 主角 eligible 时恒主角主讲（群像由 cast/beat 体现，不再切章主视角）。
     p = Planner(_repo(), llm=None, theme="x")
     elig = ["hero", "ally", "foe"]
     leads = [p._pov_lead(s, elig, "hero")[0] for s in (4, 8, 12)]
-    assert "hero" not in leads                      # 第 4/8/12 章配角主讲
-    assert set(leads) <= {"ally", "foe"}            # 且在 eligible 配角间轮换
-    assert len(set(leads)) >= 2                      # 轮换到不同配角
+    assert leads == ["hero", "hero", "hero"]        # 第 4/8/12 章仍主角主讲
 
 
 def test_pov_lead_hero_not_eligible_falls_back():

@@ -10,6 +10,7 @@ import uuid
 
 from .llm.base import LLMClient
 from .models import CharacterCard, Entity, InventoryItem, Persona
+from .naming_generator import assign_character_name
 from .repository import Repository
 
 # 显式化名/代号：从种子文本确定性抽取（治"种子写了化名秦书白却没人用"）。
@@ -118,16 +119,23 @@ def cast_or_get(repo: Repository, slot_key: str, tier: str = "supporting",
             repo.insert_entity(Entity(obj, "object", obj, {}))
         if repo.get_inventory_item(obj) is None:
             repo.set_inventory(InventoryItem(obj, holder_agent_id=agent_id, status="held"))
+    assign_character_name(repo, agent_id, source="llm")
     return card
 
 
 def ensure_cards_for_personas(repo: Repository) -> list[str]:
     """锁定时为种子已知角色批量建卡：personas[0]=lead，其余=supporting。幂等。"""
     out: list[str] = []
-    for i, p in enumerate(repo.list_personas()):
+    personas = repo.list_personas()
+    has_lead = any(c.tier == "lead" for c in repo.list_cards())
+    lead_agent = next((p.agent_id for p in personas if not p.agent_id.startswith("cast_")),
+                      personas[0].agent_id if personas else "")
+    for i, p in enumerate(personas):
         if repo.get_card_for_agent(p.agent_id):
             continue
-        tier = "lead" if i == 0 else "supporting"
+        tier = "lead" if (not has_lead and p.agent_id == lead_agent) else "supporting"
+        if tier == "lead":
+            has_lead = True
         trait = (p.values[0]["name"] if p.values else "") or p.fatal_flaw or "（待定）"
         repo.add_card(CharacterCard(
             card_id=f"card_{uuid.uuid4().hex[:8]}", agent_id=p.agent_id, tier=tier,
@@ -137,6 +145,7 @@ def ensure_cards_for_personas(repo: Repository) -> list[str]:
             core_desire=p.want, verbal_habits="、".join(p.mannerisms),
             fatal_flaw=p.fatal_flaw, motif_objects=p.motif_objects, arc="",
         ))
+        assign_character_name(repo, p.agent_id, source="seed")
         out.append(p.agent_id)
     return out
 
@@ -213,8 +222,9 @@ def enrich_character_cards(repo: Repository, llm: LLMClient | None = None,
         if p:
             persona_brief = (f"欲望：{p.want}\n弱点：{p.fatal_flaw}\n说话方式：{p.voice}\n"
                              f"珍视：{'、'.join(v.get('name','') for v in (p.values or []))[:80]}")
+        # system 不含角色名（角色名在 user 里给）→ 全体 lead 调用共享同一前缀，命中 KV-cache。
         sys = (
-            f"你是小说人物设定师。【任务：主角极详】角色「{c.name}」(lead)。给 JSON 五段："
+            f"你是小说人物设定师。【任务：主角极详】(lead) 为给定角色写 JSON 五段："
             f"appearance(生理：外貌/身材/年龄/标志物，≥80字){tone_hint}、"
             "social_role(社会：出身/家庭/阶层/隶属势力/社会关系网，≥80字)、"
             "psychology(心理：性格/三观/恐惧/欲望细化，≥80字)、"
@@ -239,8 +249,9 @@ def enrich_character_cards(repo: Repository, llm: LLMClient | None = None,
     lead_blob = "\n".join(f"· {c.name}：{c.one_liner or c.defining_trait}" for c in cards if c.tier == "lead")
     for c in supports:
         fac_name = _ent_faction(c.agent_id) or c.key_relation
+        # system 不含角色名（角色名在 user 里给）→ 全体 supporting 调用共享同一前缀，命中 KV-cache。
         sys = (
-            f"你是小说人物设定师。【任务：主配加厚】角色「{c.name}」(supporting)。给 JSON 五段："
+            f"你是小说人物设定师。【任务：主配加厚】(supporting) 为给定角色写 JSON 五段："
             f"appearance(30-80字){tone_hint}、social_role(30-80字)、psychology(30-80字)、"
             "backstory(60-120字)、arc(1句)。"
             "**严格符合世界观与势力，不得编造与设定冲突的细节；与主角差异化**。只输出 JSON。"
@@ -607,6 +618,7 @@ def cast_named_characters(repo: Repository, bible_text: str, want_text: str,
             sfid = f"f_named_{uuid.uuid4().hex[:6]}"
             repo.append_fact(Fact(sfid, "state", str(secret), involved_entities=[agent_id]))
             repo.insert_knowledge(KnowledgeItem(agent_id, sfid, str(secret), 1.0, 0))
+        assign_character_name(repo, agent_id, source="llm")
         existing_names.append(name)
         name_to_aid[name] = agent_id
         out.append(name)
@@ -687,3 +699,51 @@ def _fallback_card_spec(slot_key: str, tier: str, repo: Repository) -> dict:
         "motif_objects": [],
         "arc": "",
     }
+
+
+def promote_faction_members_to_personas(repo: Repository) -> int:
+    """把势力核心成员（W3 落卡的 named_ 实体）登记为轻量配角 persona，使其可被章节选角。
+
+    根因修复：选角池只认 list_personas()，而势力成员只是 entity+card → 永远进不了 cast。
+    本函数据其 CharacterCard / key_member 信息派生一个 Persona（want/voice/flaw），
+    并确保 entity.attributes.faction_id 已写实。纯本地、幂等、无 LLM。返回新建 persona 数。
+    """
+    existing = {p.agent_id for p in repo.list_personas()}
+    created = 0
+    for fac in repo.list_factions():
+        for m in (fac.key_members or []):
+            aid = m.get("agent_id")
+            if not aid or aid in existing:
+                continue
+            ent = repo.get_entity(aid)
+            if ent is None or ent.type != "character":
+                continue
+            # 确保势力归属写实（选角的势力相关性判定依赖它）
+            attrs = dict(ent.attributes or {})
+            if not attrs.get("faction_id"):
+                attrs["faction_id"] = fac.faction_id
+                repo.update_entity_attributes(aid, attrs)
+            card = repo.get_card_for_agent(aid)
+            role = m.get("role", "") or (card.defining_trait if card else "")
+            note = m.get("note", "") or (card.backstory if card else "")
+            want = (card.core_desire if card and getattr(card, "core_desire", "") else "") or \
+                   f"维护{fac.name}的利益与自身在其中的位置"
+            voice = (card.voice_register if card and getattr(card, "voice_register", "") else "") or "言辞利落"
+            repo.insert_persona(Persona(
+                agent_id=aid,
+                name=ent.name,
+                want=want,
+                values=[{"name": "忠于所属势力", "weight": 0.6}],
+                fatal_flaw=(card.fatal_flaw if card and getattr(card, "fatal_flaw", "") else ""),
+                obstacles=[],
+                cost_threshold={"note": ""},
+                voice=voice,
+                mannerisms=[],
+                motif_objects=[],
+                arc_state={"last_change_tick": 0, "last_flaw_cost_tick": 0, "changed": False,
+                           "minor": True, "faction_id": fac.faction_id, "role": role, "note": note},
+                cost_ledger=[],
+            ))
+            existing.add(aid)
+            created += 1
+    return created

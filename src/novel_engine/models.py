@@ -44,6 +44,7 @@ class Event:
     location_id: str | None = None
     perceivers: list[str] = field(default_factory=list)
     beat_id: str | None = None
+    story_clock: int | None = None  # 故事时钟：距故事第0天0点的分钟数（含跨日）；None=钟点未知。≠story_time(tick)
 
 
 @dataclass
@@ -165,6 +166,8 @@ class Part:
     title: str = ""
     goal: str = ""
     region: str = ""
+    key_twist: str = ""
+    new_crisis_hook: str = ""
     reveal_node_ids: list[str] = field(default_factory=list)  # 本部分计划上线的揭示链节点
     status: str = "planned"  # planned | active | done
 
@@ -203,6 +206,15 @@ class ChapterPlan:
     beat_goals: list[str] = field(default_factory=list)
     beat_povs: list[str] = field(default_factory=list)   # 每个 beat 的视角人物 id（POV 跟着节拍走）
     reveal_gate: list[str] = field(default_factory=list)
+    must_happen: list[str] = field(default_factory=list)
+    required_exit_state: str = ""
+    scene_flow: list[str] = field(default_factory=list)
+    allowed_entity_ids: list[str] = field(default_factory=list)
+    allowed_fact_ids: list[str] = field(default_factory=list)
+    forbidden: list[str] = field(default_factory=list)
+    item_sources: dict[str, Any] = field(default_factory=dict)
+    package_version: int = 1
+    thread_decisions_json: list[dict[str, Any]] = field(default_factory=list)
     knowledge_delta: dict[str, Any] = field(default_factory=dict)  # {agent_id:[fid], "reader":[fid]}
     summary: str = ""
     scene_ids: list[str] = field(default_factory=list)
@@ -219,6 +231,7 @@ class ChapterPlan:
     exit_state: str = ""              # 问题4：本章必须达成的世界状态变化（推进闸门）
     audited: int = 0                  # 审计闸门：0 未审 / 1 已通过（衔接·转场·道具人物合规）
     conflict_type: str = ""           # S1 本章冲突类型（轮换，治"七章同一支舞"）
+    time_hint: str = ""               # 故事时钟：本章大致时间 + 朝活跃死线逼近的硬约束（不得倒流）
     status: str = "planned"  # planned | active | done
 
 
@@ -239,6 +252,27 @@ class Location:
     culture_local: str = ""  # 本地风土人情/典型活动/常驻人群
     summary: str = ""        # 1–2句·常驻注入
     detail: str = ""         # 综合描述·按需检索
+    foreshadow_from: int = 0
+    reveal_chapter: int = 0
+    secret_reveal_chapter: int = 0
+    foreshadow_hint: str = ""
+    secret_truth: str = ""
+
+
+@dataclass
+class SceneAnchor:
+    """关键场景档案：把反复出现的重要场景（犯罪现场/主角据点/某个地标）的
+    **锁定事实**固定下来，供跨章一致性审计比对。首次确立即锁定，后续章节只追加
+    新事实、不覆盖已锁定的内容。悬疑题材尤其依赖它防止现场细节漂移。"""
+
+    scene_id: str                                   # 'scn_xxxx'
+    name: str = ""                                  # 场景名，如「锦澜湾17号别墅地下室」
+    kind: str = "scene"                             # crime_scene | base | landmark | scene
+    location_id: str = ""                           # 可选关联 location 实体 id
+    canonical_facts: list[str] = field(default_factory=list)  # 锁定不变量（地点/布局/物证…）
+    aliases: list[str] = field(default_factory=list)          # 别名/指代
+    established_chapter: int = 0                     # 首次确立的章序
+    created_at: str = ""
 
 
 @dataclass
@@ -274,6 +308,11 @@ class Faction:
     detail: str = ""
     source: str = "w3"
     created_at: int = 0
+    foreshadow_from: int = 0
+    reveal_chapter: int = 0
+    secret_reveal_chapter: int = 0
+    foreshadow_hint: str = ""
+    secret_truth: str = ""
 
 
 @dataclass
@@ -346,6 +385,11 @@ class CharacterCard:
     social_role: str = ""   # 社会：出身/家庭/阶层/隶属势力/社会关系网
     psychology: str = ""    # 心理：性格/三观/恐惧/欲望细化
     created_at: int = 0
+    foreshadow_from: int = 0
+    reveal_chapter: int = 0
+    secret_reveal_chapter: int = 0
+    foreshadow_hint: str = ""
+    secret_truth: str = ""
 
 
 @dataclass
@@ -374,6 +418,33 @@ class ToneProfile:
 
 
 @dataclass
+class StyleClaim:
+    """Author Writing Sheet 中的一条文风断言 + 原文证据。"""
+
+    claim: str            # 风格断言,如"偏好用新闻报道体做元讽刺"
+    evidence: str = ""    # 原文摘录(≤150字)
+    source_chapter: str = ""
+
+
+@dataclass
+class AuthorWritingSheet:
+    """论文 arXiv:2502.13028 的 Author Writing Sheet：四维 Claim-Evidence 结构化文风画像。
+    由 Average Author 对照式提取 + 增量移动式合并产出。"""
+
+    name: str = ""
+    source_genre: str = ""
+    plot: list[StyleClaim] = field(default_factory=list)
+    creativity: list[StyleClaim] = field(default_factory=list)
+    development: list[StyleClaim] = field(default_factory=list)
+    language: list[StyleClaim] = field(default_factory=list)
+    persona_md: str = ""
+    n_segments: int = 0
+
+    def is_set(self) -> bool:
+        return bool(self.language or self.creativity or self.plot or self.development)
+
+
+@dataclass
 class StyleProfile:
     """B0 文风模拟（Style Skill）：用户上传作品蒸馏 / 上传现成文风，得到的文风指纹。
     存在且 enabled 时叠加并优先于 tone_profile（覆盖 register/rhythm/diction/devices + 提供样例）。
@@ -389,10 +460,255 @@ class StyleProfile:
     motifs: list[str] = field(default_factory=list)       # 母题意象
     samples: list[str] = field(default_factory=list)      # 2-4 段短样例（仅供模仿腔调）
     metrics: dict = field(default_factory=dict)           # 6 维量化指纹（compute_style_metrics）
+    persona_md: str = ""              # AWS 派生的二人称 persona
     enabled: bool = True
 
     def is_set(self) -> bool:
         return bool(self.enabled and (self.register or self.rhythm or self.samples))
+
+
+@dataclass
+class StyleSegment:
+    id: str
+    project_id: str = ""
+    source_chapter_id: int = 0
+    start_offset: int = 0
+    end_offset: int = 0
+    text: str = ""
+    voice_type: str = "narrator"  # narrator | character | mixed
+    character_id: str | None = None
+    pov_character_id: str | None = None
+    discourse_type: str = "narration"  # narration | description | dialogue | interior | action | reflection | transition
+    scene_type: str = "general"
+    emotion_json: list[str] = field(default_factory=list)
+    register_type: str = "neutral"
+    feature_json: dict[str, Any] = field(default_factory=dict)
+    embedding_key: str = ""
+    quality_score: float = 0.0
+    annotation_confidence: float = 0.0
+    enabled: bool = True
+
+
+@dataclass
+class StyleCluster:
+    id: str
+    project_id: str = ""
+    cluster_type: str = ""
+    label: str = ""
+    centroid_key: str = ""
+    feature_summary_json: dict[str, Any] = field(default_factory=dict)
+    representative_segment_ids_json: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StyleNegativeSample:
+    id: str
+    project_id: str = ""
+    text: str = ""
+    failure_types_json: list[str] = field(default_factory=list)
+    related_source_segment_ids_json: list[str] = field(default_factory=list)
+    score_json: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+
+
+@dataclass
+class StylePacket:
+    packet_id: str = ""
+    beat_index: int = 0
+    beat_label: str = ""
+    global_prior: dict[str, Any] = field(default_factory=dict)
+    voice_profile: dict[str, Any] = field(default_factory=dict)
+    scene_profile: dict[str, Any] = field(default_factory=dict)
+    target_statistics: dict[str, Any] = field(default_factory=dict)
+    positive_exemplars: list[dict[str, Any]] = field(default_factory=list)
+    negative_patterns: list[dict[str, Any]] = field(default_factory=list)
+    previous_paragraph_tail: str = ""
+    next_beat_constraint: str = ""
+    router: dict[str, Any] = field(default_factory=dict)
+    experience_prior: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SourceDocument:
+    id: int = 0
+    project_id: str = ""
+    filename: str = ""
+    format: str = "txt"  # txt | epub | docx | seed
+    raw_text: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class SourceChapter:
+    id: int = 0
+    project_id: str = ""
+    source_document_id: int = 0
+    chapter_no: int = 0
+    title: str = ""
+    text: str = ""
+    word_count: int = 0
+    summary: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class SourceChunk:
+    id: int = 0
+    project_id: str = ""
+    chapter_id: int = 0
+    chunk_no: int = 0
+    text: str = ""
+    summary: str = ""
+    embedding_key: str = ""
+
+
+@dataclass
+class StoryBibleRecord:
+    project_id: str = ""
+    source_type: str = "original"  # original | continuation
+    title_style_json: dict[str, Any] = field(default_factory=dict)
+    world_config_json: dict[str, Any] = field(default_factory=dict)
+    characters_json: list[dict[str, Any]] = field(default_factory=list)
+    locations_json: list[dict[str, Any]] = field(default_factory=list)
+    factions_json: list[dict[str, Any]] = field(default_factory=list)
+    items_json: list[dict[str, Any]] = field(default_factory=list)
+    relationships_json: list[dict[str, Any]] = field(default_factory=list)
+    timeline_json: list[dict[str, Any]] = field(default_factory=list)
+    open_threads_json: list[dict[str, Any]] = field(default_factory=list)
+    last_state_json: dict[str, Any] = field(default_factory=dict)
+    narrative_constraints_json: dict[str, Any] = field(default_factory=dict)
+    style_profile_id: int | None = None
+    updated_at: str = ""
+
+
+@dataclass
+class AuthorExperienceSource:
+    source_id: str
+    project_id: str = ""
+    label: str = ""
+    source_type: str = "essay"
+    path: str = ""
+    content_hash: str = ""
+    enabled: bool = True
+    created_at: str = ""
+
+
+@dataclass
+class AuthorExperienceFragment:
+    fragment_id: str
+    project_id: str = ""
+    source_id: str = ""
+    fragment_index: int = 0
+    title_hint: str = ""
+    text: str = ""
+    tags_json: list[str] = field(default_factory=list)
+    emotion_json: list[str] = field(default_factory=list)
+    self_schema_json: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+
+
+@dataclass
+class AuthorLifeModel:
+    model_id: str
+    project_id: str = ""
+    source_ids_json: list[str] = field(default_factory=list)
+    source_label: str = ""
+    summary: str = ""
+    core_wound_json: dict[str, Any] = field(default_factory=dict)
+    defense_patterns_json: list[dict[str, Any]] = field(default_factory=list)
+    desire_vectors_json: list[dict[str, Any]] = field(default_factory=list)
+    relationship_model_json: dict[str, Any] = field(default_factory=dict)
+    narrative_engines_json: list[dict[str, Any]] = field(default_factory=list)
+    prose_rules_json: dict[str, Any] = field(default_factory=dict)
+    worldview_json: dict[str, Any] = field(default_factory=dict)
+    evidence_json: list[dict[str, Any]] = field(default_factory=list)
+    confidence_json: dict[str, Any] = field(default_factory=dict)
+    persona_prompt: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class ContinuationMeta:
+    source_text_hash: str = ""
+    continuation_hint: str = ""
+    series_id: str = ""
+    source_book_title: str = ""
+    current_book_title: str = ""
+    book_index: int = 1
+    write_mode: str = ""
+    chapter_start_no: int = 1
+    latest_source_chapter_no: int = 0
+    continuation_ready: bool = False
+    continuation_phase: str = ""
+    time_position: str = ""
+    protagonist_strategy: str = ""
+    inherit_unresolved_threads: bool = True
+    experience_layer_enabled: bool = False
+    experience_layer_mode: str = "off"
+    experience_source_path: str = ""
+    experience_style_level: str = "none"
+    active_life_model_id: str = ""
+
+
+@dataclass
+class ContinuationJobRecord:
+    id: str = ""
+    project_id: str = ""
+    phase: str = ""
+    progress: int = 0
+    total: int = 0
+    status: str = "pending"
+    error: str = ""
+    config_json: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
+class WritingSettings:
+    project_id: str = ""
+    target_words: int = 3000
+    min_words: int = 2600
+    max_words: int = 4000
+    outline_first: bool = False
+    auto_chapter_count: int = 5
+    require_human_acceptance: bool = True
+    style_profile_id: int | None = None
+
+
+@dataclass
+class ChapterDraftRecord:
+    id: int = 0
+    project_id: str = ""
+    chapter_no: int = 0
+    title: str = ""
+    outline: str = ""
+    prose: str = ""
+    guidance: str = ""
+    target_words: int = 0
+    mode: str = "manual"  # manual | auto
+    status: str = "draft"  # draft | pending_acceptance | blocked | accepted | rejected
+    context_snapshot_json: dict[str, Any] = field(default_factory=dict)
+    candidate_group_id: str = ""
+    style_packet_json: dict[str, Any] = field(default_factory=dict)
+    score_breakdown_json: dict[str, Any] = field(default_factory=dict)
+    retrieved_segment_ids_json: list[str] = field(default_factory=list)
+    revision_history_json: list[dict[str, Any]] = field(default_factory=list)
+    created_at: str = ""
+    accepted_at: str = ""
+
+
+@dataclass
+class AcceptedChapterRecord:
+    id: int = 0
+    project_id: str = ""
+    draft_id: int = 0
+    chapter_no: int = 0
+    title: str = ""
+    prose: str = ""
+    summary: str = ""
+    created_at: str = ""
 
 
 @dataclass

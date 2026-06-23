@@ -184,9 +184,10 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
   const nodesRef = useRef<SimNode[]>([]);
   const byIdRef = useRef<Record<string, SimNode>>({});
   const alphaRef = useRef(1);
+  const alphaTargetRef = useRef(0);
   const tRef = useRef({ x: 0, y: 0, k: 0.72 });
   const hoverRef = useRef<string | null>(null);
-  const pointerRef = useRef({ down: false, moved: 0, dragNode: null as SimNode | null, sx: 0, sy: 0 });
+  const pointerRef = useRef({ down: false, moved: 0, dragging: false, dragNode: null as SimNode | null, sx: 0, sy: 0 });
   const uiRef = useRef<any>({});
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -330,7 +331,8 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
       runSimTick(nodes, data.edges, warmAlpha, byId);
       warmAlpha *= 0.97;
     }
-    alphaRef.current = warmAlpha;
+    alphaRef.current = 0;
+    alphaTargetRef.current = 0;
   }, [data]);
 
   /* ── 渲染循环 ── */
@@ -383,11 +385,14 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
       // 修复 canvas 尺寸（ResizeObserver 首次可能拿到 0）
       if (canvas.width === 0 && container.clientWidth > 0) resize();
 
-      // 物理 tick
-      const simActive = alpha > 0.002;
-      if (simActive) {
-        runSimTick(nodes, edges, alpha, byId);
-        alphaRef.current *= 0.993;
+      // 物理 tick — alphaTarget 模型（同 d3-force）
+      const alphaDecay = 0.0228;
+      const alphaMin = 0.001;
+      let a = alpha + (alphaTargetRef.current - alpha) * alphaDecay;
+      if (a < alphaMin && alphaTargetRef.current === 0) a = 0;
+      alphaRef.current = a;
+      if (a > alphaMin) {
+        runSimTick(nodes, edges, a, byId);
       }
 
       const dpr = window.devicePixelRatio || 1;
@@ -574,13 +579,13 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
       const [wx, wy] = toWorld(mx, my);
       tRef.current = { k: k2, x: mx - wx * k2, y: my - wy * k2 };
     };
+    const DRAG_THRESHOLD = 5;
     const onDown = (ev: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
       const n = hitTest(mx, my);
-      pointerRef.current = { down: true, moved: 0, dragNode: n, sx: mx, sy: my };
+      pointerRef.current = { down: true, moved: 0, dragging: false, dragNode: n, sx: mx, sy: my };
       canvas.setPointerCapture(ev.pointerId);
-      if (n) { alphaRef.current = Math.max(alphaRef.current, 0.25); n.fx = n.x; n.fy = n.y; }
     };
     const onMove = (ev: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
@@ -589,8 +594,17 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
       if (p.down) {
         p.moved += Math.abs(mx - p.sx) + Math.abs(my - p.sy);
         if (p.dragNode) {
-          const [wx, wy] = toWorld(mx, my);
-          p.dragNode.fx = wx; p.dragNode.fy = wy;
+          if (!p.dragging && p.moved >= DRAG_THRESHOLD) {
+            p.dragging = true;
+            p.dragNode.fx = p.dragNode.x;
+            p.dragNode.fy = p.dragNode.y;
+            alphaTargetRef.current = 0.3;
+            alphaRef.current = Math.max(alphaRef.current, 0.1);
+          }
+          if (p.dragging) {
+            const [wx, wy] = toWorld(mx, my);
+            p.dragNode.fx = wx; p.dragNode.fy = wy;
+          }
         } else {
           tRef.current = { ...tRef.current, x: tRef.current.x + mx - p.sx, y: tRef.current.y + my - p.sy };
         }
@@ -603,13 +617,13 @@ export function KnowledgeGraph({ data }: { data: GraphData }) {
     };
     const onUp = () => {
       const p = pointerRef.current;
-      if (p.dragNode) {
+      if (p.dragNode && p.dragging) {
         p.dragNode.fx = null; p.dragNode.fy = null;
-        alphaRef.current = Math.max(alphaRef.current, 0.15);
+        alphaTargetRef.current = 0;
       }
-      if (p.moved < 5 && p.dragNode) setSelectedId(p.dragNode.id);
-      else if (p.moved < 5) { setSelectedId(null); setFocus(null); }
-      pointerRef.current = { down: false, moved: 0, dragNode: null, sx: 0, sy: 0 };
+      if (p.moved < DRAG_THRESHOLD && p.dragNode) setSelectedId(p.dragNode.id);
+      else if (p.moved < DRAG_THRESHOLD) { setSelectedId(null); setFocus(null); }
+      pointerRef.current = { down: false, moved: 0, dragging: false, dragNode: null, sx: 0, sy: 0 };
     };
     const onDbl = (ev: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();

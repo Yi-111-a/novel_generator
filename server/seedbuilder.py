@@ -6,13 +6,16 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 from typing import Any
 
 from novel_engine import db
 from novel_engine.llm.base import LLMClient
 from novel_engine.models import Ending, Entity, Fact, KnowledgeItem, Persona, Thread
+from novel_engine.naming_generator import reconcile_project_names
 from novel_engine.repository import Repository
 
 # 完成度清单（每项都要求该层"全部内容"填完）
@@ -103,7 +106,7 @@ _COCREATE_SYS = """你是一名资深小说编辑，正在和用户**共创**一
     "personas": [
       {"id":"p_x","name":"…","gender":"男或女","want":"…","values":[{"name":"…","weight":0.8}],
        "fatalFlaw":"…","obstacles":["…"],"costThreshold":"…","voice":"…",
-       "mannerisms":["…"],"motifObjects":[],"arcState":"…","costLedger":[]}
+       "mannerisms":["…"],"motifObjects":["黄符","账本"],"arcState":"…","costLedger":[]}
     ]
   }
 }
@@ -114,6 +117,7 @@ _COCREATE_SYS = """你是一名资深小说编辑，正在和用户**共创**一
   · 不可变层：settingCore + geography + culture + physicsRules 四项都要有；
   · 意图层：theme + protagonistWant；候选结局 ≥2，且每个含 summary + themeExpression + requiredConditions；
   · 角色 ≥2，且每个角色都要填全：name/want/values/fatalFlaw/obstacles/costThreshold/voice/mannerisms；
+  · motifObjects 必须是**中文物品名**（2-6 字，如「黄符」「账本」「青衍长剑」），**不要**用拼音/英文/obj_ 前缀，系统会自动派 ID；
   · 初始信息不对称：让不同角色对关键事实持不同认知。
 - 主动引导用户把上述缺口逐个补上；当全部就绪时，在 reply 里告诉用户"可以开始写作了"。"""
 
@@ -225,9 +229,45 @@ def _merge_patch(draft: dict[str, Any], patch: dict[str, Any]) -> None:
         draft["personas"] = list(by_id.values())
 
 
+_FUTURE_OUTLINE_RE = re.compile(
+    r"(前[一二三四五六七八九十百\d]+章节奏|第\s*[一二三四五六七八九十百\d]+\s*章|第\s*[一二三四五六七八九十百\d]+\s*卷)"
+)
+
+
+def _world_history_sections(wb: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Keep future plot outlines out of canonical world history.
+
+    Seed drafts often use ``worldBible.history`` as a convenient place for
+    "chapter 1...chapter 10..." notes. Those notes are useful planning material,
+    but if we store them as ``history`` the writer treats future cases as already
+    established world facts and starts expanding later units too early.
+    """
+    history = str(wb.get("history", "") or "").strip()
+    if not history:
+        return []
+    if not _FUTURE_OUTLINE_RE.search(history):
+        return [("history", "历史/背景", history)]
+
+    canonical = str(wb.get("preStoryHistory", "") or wb.get("backstory", "") or "").strip()
+    if not canonical:
+        canonical = (
+            "原草稿的 history 字段包含章节节奏或未来剧情提纲，不能作为世界历史、既定背景或正文可提前展开的事实。"
+            "开局历史只以设定内核、文化规则、人物草稿中明确发生在故事开始前的事实为准；"
+            "未来单元必须按卷纲滚动展开。"
+        )
+    planning = (
+        "【非历史】以下内容只是未来规划，不得当作已发生背景、世界史或正文可提前展开的事实：\n"
+        f"{history}"
+    )
+    return [
+        ("history", "历史/背景", canonical),
+        ("planning_notes", "未来提纲（非既定历史）", planning),
+    ]
+
+
 # ---------------- SeedDraft → Repository ----------------
 def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> Repository:
-    """把锁定的种子草稿落地成一套可供 Director 运行的世界状态。
+    """把锁定的种子草稿落地成一套可供写作链路继续使用的世界状态。
 
     db_path 给文件路径时世界状态落盘（重启可恢复）；默认 :memory: 供测试。
     """
@@ -245,14 +285,15 @@ def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> R
     )
     # §12 世界圣经全量存档：把草稿里的世界观逐节原文入库（不摘要），供规划层按需检索喂入。
     pr = wb.get("physicsRules", []) or []
-    for section, title, body in [
+    section_entries = [
         ("settingCore", "设定内核", wb.get("settingCore", "")),
         ("geography", "地理", wb.get("geography", "")),
         ("culture", "文化/势力", wb.get("culture", "")),
         ("rules", "世界规则", "\n".join(str(x) for x in pr) if isinstance(pr, list) else str(pr)),
-        ("history", "历史/背景", wb.get("history", "")),
         ("lexicon", "专有名词", wb.get("lexicon", "")),
-    ]:
+    ]
+    section_entries.extend(_world_history_sections(wb))
+    for section, title, body in section_entries:
         repo.add_bible_section(section, title, body, source="user")
 
     personas = draft.get("personas", []) or []
@@ -260,15 +301,27 @@ def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> R
     repo.insert_entity(Entity("loc_main", "location", "主场景", {}))
     for p in personas:
         repo.insert_entity(Entity(p["id"], "character", p["name"], {}))
+        # 物品条目按"中文名"语义解析：
+        #   · 已是 obj_ 前缀 → 视作 ID 直接落（兼容旧草稿；name=去前缀的占位串）
+        #   · 中文/任何非 obj_ 前缀串 → 视作显示名，hash 派一个 obj_xxxxxx ID（避免拼音占位名进正文）
+        # persona.motif_objects 存最终 ID 列表（与 entity_id 对齐）。
+        resolved_motifs: list[str] = []
         for obj in p.get("motifObjects", []) or []:
-            if not repo.entity_exists(obj):
-                # 用人类可读的显示名（去掉 obj_ 前缀/下划线），避免 id 直接入正文
+            obj = str(obj).strip()
+            if not obj:
+                continue
+            if obj.startswith("obj_"):
+                # 兼容：旧契约/手工录入的 ID。name 用去前缀+换空格的弱回退；
+                # 注意这里仍可能漏出拼音占位名，但仅用于向后兼容已有数据。
+                eid = obj
+                display = obj[4:].replace("_", " ").strip() or obj
+            else:
+                # 新契约：中文显示名 → 派 hash ID
+                eid = f"obj_{hashlib.md5(obj.encode('utf-8')).hexdigest()[:6]}"
                 display = obj
-                if obj.startswith("obj_"):
-                    display = obj[4:].replace("_", " ").strip()
-                if not display:
-                    display = obj
-                repo.insert_entity(Entity(obj, "object", display, {}))
+            if not repo.entity_exists(eid):
+                repo.insert_entity(Entity(eid, "object", display, {}))
+            resolved_motifs.append(eid)
         repo.insert_persona(
             Persona(
                 agent_id=p["id"],
@@ -280,7 +333,7 @@ def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> R
                 cost_threshold={"note": p.get("costThreshold", "")},
                 voice=p.get("voice", ""),
                 mannerisms=p.get("mannerisms", []) or [],
-                motif_objects=p.get("motifObjects", []) or [],
+                motif_objects=resolved_motifs,
                 # 作者/共创声明的性别写入 arc_state（权威，narrator 优先采用，跳过事后推断）
                 arc_state={"last_change_tick": 0, "last_flaw_cost_tick": 0, "changed": False,
                            **({"gender": p["gender"]} if p.get("gender") in ("男", "女") else {})},
@@ -367,4 +420,5 @@ def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> R
                     KnowledgeItem(mid["id"], f_premise.fact_id, f"据传，{protagonist['name']}回来另有所图（真假难辨）。", 0.5, 0)
                 )
 
+    reconcile_project_names(repo)
     return repo

@@ -49,8 +49,21 @@ def _ch() -> ChapterPlan:
 def test_scene_writer_injects_world_bible_with_island_note():
     r, llm = _repo(), _Cap()
     SceneWriter(r, llm).write(SceneSpec(pov="hero", beat="接头", chapter=_ch()))
-    assert "世界观" in llm.sys and "孤岛" in llm.sys
-    assert "不是真的海岛" in llm.sys          # 防望文生义
+    assert "世界观" in llm.usr and "孤岛" in llm.usr
+    assert "不是真的海岛" in llm.usr          # 防望文生义
+    # KV-cache 不变量：动态世界观检索必须留在 user 变量后缀，不得污染 system 稳定前缀
+    assert "孤岛" not in llm.sys
+
+
+def test_system_prefix_is_stable_across_scenes_for_kv_cache():
+    """KV-cache 不变量：system 稳定前缀必须跨场景/跨 POV 逐字节一致，
+    否则破坏 DeepSeek 自动前缀缓存。视角人名等变量只能进 user 后缀。"""
+    r = _repo()
+    a, b = _Cap(), _Cap()
+    SceneWriter(r, a).write(SceneSpec(pov="hero", beat="接头", chapter=_ch()))
+    SceneWriter(r, b).write(SceneSpec(pov="ally", beat="撤离", chapter=_ch()))
+    assert a.sys == b.sys                      # 前缀稳定
+    assert a.usr != b.usr                      # 变量后缀按场景不同
 
 
 def test_scene_writer_injects_geo_and_arc_and_prior():

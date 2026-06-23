@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
+import json
+
 from novel_engine import db
+from novel_engine.llm.mock import MockClient
 from novel_engine.models import (
     Entity, Fact, Foreshadow, KnowledgeItem, Persona,
 )
@@ -32,7 +35,7 @@ def _seed_repo() -> Repository:
 
 def test_build_master_creates_parts_chain_and_inventory():
     r = _seed_repo()
-    info = Planner(r, llm=None, theme="轮回证道").build_master(part_count=4)
+    info = Planner(r, llm=None, theme="轮回证道", story_scale="short").build_master(part_count=4)
     parts = r.list_parts()
     assert 3 <= len(parts) <= 5 and len(parts) == 4
     assert all(p.region for p in parts)  # 每部分有地域
@@ -55,11 +58,102 @@ def test_build_master_creates_parts_chain_and_inventory():
 
 def test_build_master_idempotent():
     r = _seed_repo()
-    p = Planner(r, llm=None)
+    p = Planner(r, llm=None, story_scale="short")
     p.build_master(part_count=3)
     n1 = len(r.list_parts())
     res = p.build_master(part_count=3)
     assert res.get("skipped") and len(r.list_parts()) == n1
+
+
+def test_new_yin_yang_project_defaults_to_serial_long_rolling_outline():
+    r = _seed_repo()
+    p = Planner(r, llm=None, theme="死人差评", template_id="yin_yang_shouhou")
+    p.build_master()
+    info = p.build_lazy_outline()
+    parts = r.list_parts()
+    assert len(parts) == 10
+    assert parts[0].title == "第一卷·林晚一星差评案"
+    assert parts[1].title == "第二卷·校车不能上"
+    assert all("故事地域" not in p.region for p in parts)
+    assert "差评" not in parts[0].region
+    assert "校车" in parts[1].region
+    location_names = [e.name for e in r.list_entities() if e.type == "location"]
+    assert all("故事地域" not in name for name in location_names)
+    assert info["arcs"] == 20
+    first_arcs = r.list_arcs(parts[0].part_id)
+    assert len(first_arcs) == 2
+    assert len(r.list_chapter_plans(first_arcs[0].arc_id)) == 8
+    assert len(r.list_chapter_plans(first_arcs[1].arc_id)) == 0
+    later_chapters = sum(
+        len(r.list_chapter_plans(a.arc_id))
+        for part in parts[1:]
+        for a in r.list_arcs(part.part_id)
+    )
+    assert later_chapters == 0
+
+
+def test_yin_yang_rejects_llm_volume_order_drift_and_uses_blueprint():
+    r = _seed_repo()
+    bad_volumes = [
+        {
+            "title": "亡妻的夜半差评",
+            "goal": "短期目标：查亡妻；阻碍：警方怀疑；连续冲突：上门试探；关键反转：尸骨出现；卷末收获+下一卷危机：收到校车投诉。",
+            "region": "无忧售后服务有限公司",
+            "key_twist": "尸骨出现",
+            "new_crisis_hook": "校车投诉出现",
+        },
+        {
+            "title": "天命公司的第一张名片",
+            "goal": "短期目标：正面追查天命公司；阻碍：公司代理人；连续冲突：合同曝光；关键反转：天命批量借寿；卷末收获+下一卷危机：医院器官案爆发。",
+            "region": "天命公司",
+            "key_twist": "天命公司正面登场",
+            "new_crisis_hook": "医院器官案爆发",
+        },
+    ]
+    for i in range(3, 11):
+        bad_volumes.append(
+            {
+                "title": f"跑偏第{i}卷",
+                "goal": "短期目标：继续推进；阻碍：未知；连续冲突：升级；关键反转：反转；卷末收获+下一卷危机：危机。",
+                "region": "无忧售后服务有限公司",
+                "key_twist": "反转",
+                "new_crisis_hook": "危机",
+            }
+        )
+    llm = MockClient([
+        json.dumps({"parts": 10}, ensure_ascii=False),
+        json.dumps(bad_volumes, ensure_ascii=False),
+    ])
+    p = Planner(r, llm=llm, theme="死人差评", template_id="yin_yang_shouhou")
+    p.build_master()
+    parts = r.list_parts()
+    assert len(parts) == 10
+    assert parts[0].title == "第一卷·林晚一星差评案"
+    assert parts[1].title == "第二卷·校车不能上"
+
+
+def test_yin_yang_volume_prompt_uses_fixed_json_contract():
+    class CaptureLLM(MockClient):
+        def __init__(self):
+            super().__init__([json.dumps({"parts": 10}, ensure_ascii=False)])
+            self.systems = []
+
+        def complete(self, system: str, user: str) -> str:
+            self.systems.append(system)
+            if "volume_blueprint" in system:
+                return "[]"
+            return super().complete(system, user)
+
+    r = _seed_repo()
+    llm = CaptureLLM()
+    p = Planner(r, llm=llm, theme="死人差评", template_id="yin_yang_shouhou")
+    p.build_master()
+    volume_prompts = [s for s in llm.systems if "volume_blueprint" in s]
+    assert volume_prompts
+    prompt = volume_prompts[-1]
+    assert '"volume_count": 10' in prompt
+    assert '"locked_title": "第一卷·林晚一星差评案"' in prompt
+    assert "title 必须完全等于 locked_title" in prompt
 
 
 def test_plan_next_arc_respects_constraints():
@@ -96,7 +190,7 @@ def test_plan_next_arc_respects_constraints():
 
 def test_rolling_generation_advances_and_terminates():
     r = _seed_repo()
-    p = Planner(r, llm=None)
+    p = Planner(r, llm=None, story_scale="short")
     p.build_master(part_count=3, arcs_per_part=1)  # 3 part × 1 arc
     # 持续懒生成章节，直到全书铺满（next_chapter 会跨 Arc 自动续建）
     for _ in range(200):

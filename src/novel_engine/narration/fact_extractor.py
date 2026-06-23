@@ -11,8 +11,9 @@ import json
 import uuid
 from dataclasses import dataclass, field
 
+from ..entity_matching import best_existing_name
 from ..llm.base import LLMClient
-from ..models import CharacterChapterLog, Entity, Event, Fact, KnowledgeItem
+from ..models import CharacterChapterLog, Entity, Event, Fact, GraphEdge, KnowledgeItem
 from ..propagation import Propagator
 from ..repository import Repository
 
@@ -96,7 +97,7 @@ class FactExtractor:
 
     def commit(self, delta: SceneDelta, pov: str, present: list[str], tick: int,
                chapter=None) -> list[str]:
-        """按隔离规则回写。返回创建的 event_id 列表（供 director 把场链到事件）。
+        """按隔离规则回写。返回创建的 event_id 列表（供上层把场链到事件）。
         Fix C 焦点化：每条事实只给 **POV + 该事实真实参与者（限本场 cast 内）** 感知，
         旁观者不自动获知（治"整 cast 越权知情"）。"""
         present_set = set(present)
@@ -153,16 +154,22 @@ class FactExtractor:
         # B2/B6.1 道具易手 → inventory。叙事道具（正文里被易手、但还没登记成实体的器物）
         # 在此**入册**（来自正文、由抽取器标记 → 合法登记，非凭空），再 transfer_item。
         ch_seq = getattr(chapter, "sequence_order", 0) if chapter else 0
-        existing_objs = {e.entity_id for e in self.repo.list_entities() if e.type == "object"}
+        existing_object_rows = [
+            (e.entity_id, e.name)
+            for e in self.repo.list_entities()
+            if e.type == "object" and not (e.attributes or {}).get("merged_into")
+        ]
+        existing_objs = {entity_id for entity_id, _name in existing_object_rows}
         for t in delta.item_transfers:
             name = str(t.get("obj", "")).strip()
-            oid = name_to_id.get(name)
+            oid = name_to_id.get(name) or best_existing_name(name, existing_object_rows)
             if not oid or oid not in existing_objs:
                 # B6.1：未登记的叙事道具 → 入册（限 2-8 字中文具体器物名，过滤泛指/英文残留）
                 if name and 2 <= len(name) <= 8 and not name.isascii():
                     oid = _uid("obj")
                     self.repo.insert_entity(Entity(oid, "object", name, {"source": "narrated"}))
                     existing_objs.add(oid)
+                    existing_object_rows.append((oid, name))
                     name_to_id[name] = oid
                 else:
                     continue
@@ -170,12 +177,48 @@ class FactExtractor:
             to = name_to_id.get(str(t.get("to", "")))
             _GONE = ("lost", "consumed", "destroyed", "sacrificed")
             note = f"第{ch_seq}章：{name}→{t.get('to', '') or ('已' + status if status in _GONE else '遗失')}"
+            # 记录易手前的持有者，用于更新知识图谱（owns 边的转移）
+            prev_holder = None
+            prev_item = self.repo.get_inventory_item(oid)
+            if prev_item:
+                prev_holder = prev_item.holder_agent_id
             self.repo.transfer_item(
                 oid, None if status in _GONE else to, ch_seq,
                 note=note, status=status)
             if chapter is not None and to and oid not in (chapter.items_present or []):
                 chapter.items_present.append(oid)
                 self.repo.upsert_chapter_plan(chapter)
+            # 同步更新知识图谱：旧持有者断开 owns、新持有者建 owns、状态终止则边过期
+            try:
+                if prev_holder:
+                    self.repo.expire_edge(prev_holder, "owns", oid, ch_seq)
+                    self.repo.expire_edge(oid, "owned_by", prev_holder, ch_seq)
+                if status in _GONE:
+                    # 失/消耗/毁/献祭 → 不挂新持有者，只记一条 lost_in/destroyed_in 章节边
+                    rel = "destroyed_in" if status in ("destroyed", "sacrificed", "consumed") else "lost_in"
+                    self.repo.upsert_edge(GraphEdge(
+                        src=oid, rel=rel, dst=str(beat_id or f"ch_{ch_seq}"),
+                        meta={"source": "narrated", "status": status, "note": note},
+                        since_chapter=ch_seq, last_active_chapter=ch_seq, intensity=0.9))
+                elif to:
+                    self.repo.upsert_edge(GraphEdge(
+                        src=to, rel="owns", dst=oid,
+                        meta={"source": "narrated", "acquired_chapter": ch_seq, "note": note},
+                        since_chapter=ch_seq, last_active_chapter=ch_seq, intensity=0.7))
+                    self.repo.upsert_edge(GraphEdge(
+                        src=oid, rel="owned_by", dst=to,
+                        meta={"source": "narrated", "note": note},
+                        since_chapter=ch_seq, last_active_chapter=ch_seq, intensity=0.7))
+                if prev_holder and to and prev_holder != to:
+                    # 易手关系：留个"X transferred Y"的可追溯轨迹
+                    self.repo.upsert_edge(GraphEdge(
+                        src=prev_holder, rel="transferred_to", dst=to,
+                        meta={"source": "narrated", "obj_id": oid, "obj_name": name,
+                              "chapter": ch_seq, "note": note},
+                        since_chapter=ch_seq, last_active_chapter=ch_seq, intensity=0.5))
+            except Exception:
+                # 知识图谱更新失败不应阻断主流程（道具转移本身已落 inventory）
+                pass
 
         # B2 揭示 → 揭示链 prereq 门控 + POV 习得真相 + 正规 commit_reveals 推读者账本
         if delta.reveals:

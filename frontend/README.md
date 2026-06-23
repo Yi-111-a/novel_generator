@@ -1,59 +1,98 @@
-# 小说模拟引擎 · 前端
+# 前端
 
-React 18 + Vite + TypeScript + Tailwind + Zustand + React Router + Recharts + lucide-react。
-对接小说模拟引擎后端（REST + SSE），也可离线用内置 Mock 预览全部界面。
+前端使用 React 18 + TypeScript + Vite，负责把原创与续写两条工作流统一到一个项目界面里。
 
-## 快速开始
+## 启动
 
 ```bash
 cd frontend
 npm install
-cp .env.example .env     # 默认 VITE_ADAPTER=mock，开箱即可离线预览
-npm run dev
+npm run dev -- --port 5180
 ```
 
-打开后默认带一个内置项目「断剑·青冥旧案」（修真复仇，主角沈砚），已在"写作中"，
-可直接浏览模拟/阅读/账本检查器；也可在仪表盘新建小说，走一遍种子工坊。
+默认开发地址：
 
-## 适配器：一键切换 http / mock
+```text
+http://localhost:5180
+```
 
-数据访问抽象为 `EngineAdapter`（`src/adapters/EngineAdapter.ts`），所有项目内方法带 `projectId`：
+## 适配器
 
-- **`HttpAdapter`（主实现）**：对接真后端 REST + SSE。端点约定见 `HttpAdapter.ts` 顶部注释；
-  聊天用 `fetch` 流式解析 SSE，模拟用每项目独立的 `EventSource`。
-- **`MockAdapter`（离线兜底）**：模块级单例，内置修真复仇世界 + 假 SSE 事件流 + 流式聊天共创。
+前端通过 `EngineAdapter` 访问数据层，当前有两套实现：
 
-切换：`.env` 里设 `VITE_ADAPTER=http`（默认，连真后端）或 `mock`（离线）。
-真后端地址用 `VITE_API_BASE_URL`（开发时 vite 会把 `/api` 代理过去）。
+- `HttpAdapter`
+- `MockAdapter`
 
-## 三个核心特性
+通过 `.env` 控制：
 
-1. **种子工坊**（`views/SeedWorkshop.tsx`）：左聊天共创、右实时种子草稿 + 完成度清单；
-   达标（`completeness.ready`）才解锁"完成种子 → 开始写作"，点击锁定不可变层、转入 `writing` 并启动模拟。
-2. **多部小说并行**：每个项目独立工作区；切换项目不中断其它项目正在跑的模拟
-   （Mock 的模拟计时器在适配器层独立运行，与 React 订阅解耦）。
-3. **既是成品也是开发工具**：顶栏「开发者模式」开关。关：干净成品流程；
-   开：显示「账本检查器」、阅读视图叠加标注、上帝控制台显示更多调试信息。
+```text
+VITE_ADAPTER=http
+VITE_API_BASE_URL=http://localhost:8000
+```
 
-## 视图
+## 当前续写入口
 
-- `/` 我的小说（仪表盘）：卡片网格、状态/进度/呼吸点、新建/重命名/删除（二次确认）。
-- `/p/:id/seed` 种子工坊 · `/world` 世界配置 · `/sim` 模拟(上帝视角) · `/read` 阅读 · `/ledger` 账本检查器(dev)。
-- `/settings` 全局设置（API Key/Base URL/Model + 测试连接）。
+续写项目已不再走旧的单独“继续写一段”面板，而是走统一的 `续写工坊` 入口：
 
-状态门禁：`seeding` 时模拟/阅读/检查器锁定并提示"先完成种子"。
+- Dashboard 新建 `continuation` 项目
+- 未锁定前进入 `/p/:projectId/continuation`
+- 锁定后进入共享的 `/outline` 与 `/read`
 
-## 设计取舍（合理假设）
+## 关键页面与组件
 
-- Mock 的运行态/聊天/草稿存内存（仅 `ApiConfig` 进 localStorage），刷新后重置；够做 UI 预览。
-- `mystery_set / irony_set / conflict_pairs` 在检查器里由 facts + 各角色账本 + 读者账本客户端推导。
-- 世界配置的"信息不对称"校验在种子层用"角色数 < 2"作近似预警（种子层无逐 agent 已知事实）。
-- 诚实性闸门警告：存在 `mustResolve && status==='open'` 的伏笔即红色提示。
+- [src/views/Dashboard.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/views/Dashboard.tsx)
+- [src/views/ContinuationWorkshop.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/views/ContinuationWorkshop.tsx)
+- [src/components/ContinuationOutlinePanel.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/components/ContinuationOutlinePanel.tsx)
+- [src/components/ContinuationSourcePanel.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/components/ContinuationSourcePanel.tsx)
+- [src/components/ContinuationProgress.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/components/ContinuationProgress.tsx)
+- [src/components/ContinuationModePicker.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/components/ContinuationModePicker.tsx)
+- [src/components/Layouts.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/components/Layouts.tsx)
+- [src/router.tsx](/C:/Users/yiyin/Desktop/novel_world/frontend/src/router.tsx)
 
-## 脚本
+## 续写工坊页面职责
+
+### Source
+
+- 导入原文
+- 展示已切章节
+- 查看 source 统计信息
+
+### Distill Progress
+
+- 展示 B1-B7 任务步骤
+- 展示当前蒸馏配置
+- 轮询任务状态
+
+### Writing Mode
+
+- 切换 `continue_current_book`
+- 切换 `new_series_book`
+- 保存续写设置
+- 锁定上下文
+
+### Draft Actions
+
+- 生成草稿
+- 拒绝草稿
+- 采纳草稿
+
+## 重要交互约束
+
+- 续写项目在 `continuationReady=false` 时，草稿生成按钮会被禁用
+- 续写项目锁定前默认不进入共享大纲页
+- 锁定完成后，续写项目与原创项目共用 `Outline` / `Reading`
+
+## 开发建议
+
+- 做前端改动时优先保持原创与续写共用主页面，避免重新长出一套平行 UI
+- 若新增续写接口，先同步更新：
+  - `src/types.ts`
+  - `src/adapters/EngineAdapter.ts`
+  - `src/adapters/HttpAdapter.ts`
+  - `src/adapters/MockAdapter.ts`
+
+## 检查
 
 ```bash
-npm run dev        # 开发
-npm run build      # tsc -b && vite build（生产构建）
-npm run typecheck  # 仅类型检查
+npm run typecheck
 ```

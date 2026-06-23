@@ -5,23 +5,27 @@ import { getAdapter } from '../adapters';
 import { BreatheDot, Empty, StatusBadge } from '../components/ui';
 import { fmtTime } from '../lib/cn';
 import { useAppStore } from '../store/useAppStore';
-import type { Project } from '../types';
+import type { Project, ProjectType } from '../types';
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const { projects, refreshProjects, createProject, renameProject, deleteProject } = useAppStore();
+  const { projects, refreshProjects, createProject, renameProject, deleteProject, templates, refreshTemplates } = useAppStore();
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState('');
+  const [projectType, setProjectType] = useState<ProjectType>('original');
+  const [templateId, setTemplateId] = useState<string>('');
 
   useEffect(() => {
     refreshProjects();
-  }, [refreshProjects]);
+    refreshTemplates();
+  }, [refreshProjects, refreshTemplates]);
 
   const onCreate = async () => {
-    const p = await createProject(title.trim() || '未命名小说');
+    const p = await createProject(title.trim() || '未命名小说', projectType, projectType === 'original' ? templateId : '');
     setTitle('');
+    setTemplateId('');
     setCreating(false);
-    navigate(`/p/${p.id}/seed`);
+    navigate(`/p/${p.id}/${projectType === 'continuation' ? 'continuation' : 'seed'}`);
   };
 
   const toggleSim = async (p: Project) => {
@@ -42,14 +46,61 @@ export function Dashboard() {
       </div>
 
       {creating && (
-        <div className="panel mb-4 flex items-center gap-2 p-3">
+        <div className="panel mb-4 space-y-3 p-3">
           <input autoFocus className="input" placeholder="给这部小说起个名字…" value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onCreate()} />
-          <button className="btn-primary" onClick={onCreate}>
-            创建并进入种子工坊
-          </button>
-          <button className="btn-ghost" onClick={() => setCreating(false)}>
-            取消
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={projectType === 'original' ? 'btn-primary' : 'btn-ghost border border-zinc-200 dark:border-zinc-800'}
+              onClick={() => setProjectType('original')}
+            >
+              原创
+            </button>
+            <button
+              className={projectType === 'continuation' ? 'btn-primary' : 'btn-ghost border border-zinc-200 dark:border-zinc-800'}
+              onClick={() => setProjectType('continuation')}
+            >
+              续写
+            </button>
+          </div>
+          {projectType === 'original' && templates.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">题材模板（选了就按这套范式生成）</div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <button
+                  className={`panel cursor-pointer p-3 text-left transition-colors ${templateId === '' ? 'border-2 border-indigo-500' : 'border border-zinc-200 hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600'}`}
+                  onClick={() => setTemplateId('')}
+                >
+                  <div className="text-sm font-semibold">自定义</div>
+                  <div className="mt-1 text-xs text-zinc-500">不套模板，按你跟 AI 共创的对话自由展开。</div>
+                </button>
+                {templates.map((t) => (
+                  <button
+                    key={t.id}
+                    className={`panel cursor-pointer p-3 text-left transition-colors ${templateId === t.id ? 'border-2 border-indigo-500' : 'border border-zinc-200 hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600'}`}
+                    onClick={() => setTemplateId(t.id)}
+                  >
+                    <div className="text-sm font-semibold">{t.label}</div>
+                    <div className="mt-1 text-xs text-zinc-500 line-clamp-3">{t.description}</div>
+                    {templateId === t.id && t.world_hints.length > 0 && (
+                      <ul className="mt-2 list-disc pl-4 text-xs text-zinc-400">
+                        {t.world_hints.slice(0, 3).map((h, i) => (
+                          <li key={i}>{h}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <button className="btn-primary" onClick={onCreate}>
+              创建并进入
+            </button>
+            <button className="btn-ghost" onClick={() => { setCreating(false); setTemplateId(''); }}>
+              取消
+            </button>
+          </div>
         </div>
       )}
 
@@ -58,7 +109,7 @@ export function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {projects.map((p) => (
-            <ProjectCard key={p.id} project={p} onOpen={() => navigate(`/p/${p.id}/${p.status === 'seeding' ? 'seed' : 'sim'}`)} onRename={renameProject} onDelete={deleteProject} onToggleSim={toggleSim} />
+            <ProjectCard key={p.id} project={p} onOpen={() => navigate(`/p/${p.id}/${p.type === 'continuation' ? (p.continuationReady ? 'outline' : 'continuation') : (p.status === 'seeding' ? 'seed' : 'sim')}`)} onRename={renameProject} onDelete={deleteProject} onToggleSim={toggleSim} />
           ))}
         </div>
       )}
@@ -118,6 +169,9 @@ function ProjectCard({ project, onOpen, onRename, onDelete, onToggleSim }: { pro
       <div className="mt-auto flex items-center justify-between pt-3 text-xs text-zinc-500">
         <span className="flex items-center gap-1.5">
           {project.runningSim && <BreatheDot />}
+          <span className="chip bg-zinc-500/15 text-zinc-400">
+            {project.type === 'continuation' ? '续写' : '原创'}
+          </span>
           {project.status === 'seeding'
             ? '播种中'
             : `已写 ${project.sceneCount ?? 0} 场 · ${project.chapterCount ?? 0} 章`}
@@ -125,7 +179,7 @@ function ProjectCard({ project, onOpen, onRename, onDelete, onToggleSim }: { pro
         <span>{fmtTime(project.updatedAt)}</span>
       </div>
 
-      {project.status === 'writing' && (
+      {project.status === 'writing' && project.type !== 'continuation' && (
         <button
           className="btn-ghost mt-2 justify-center border border-zinc-200 dark:border-zinc-800"
           onClick={() => onToggleSim(project)}

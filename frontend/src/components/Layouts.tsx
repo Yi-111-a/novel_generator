@@ -1,6 +1,6 @@
 import { AlertTriangle, BookMarked, BookOpen, FlaskConical, Library, Lock, Network, ScrollText, Settings2, Sparkles } from 'lucide-react';
 import { ReactNode, useEffect, useState } from 'react';
-import { NavLink, Outlet, useNavigate, useOutletContext, useParams, useRouteError } from 'react-router-dom';
+import { NavLink, Navigate, Outlet, useNavigate, useOutletContext, useParams, useRouteError } from 'react-router-dom';
 import { cn } from '../lib/cn';
 import { useAppStore } from '../store/useAppStore';
 import type { Project } from '../types';
@@ -30,6 +30,7 @@ export function useProjectCtx() {
 }
 
 const TABS = [
+  { to: 'continuation', label: '续写工坊', icon: Sparkles, lockInSeeding: false, dev: false },
   { to: 'seed', label: '种子工坊', icon: Sparkles, lockInSeeding: false, dev: false },
   { to: 'world', label: '世界配置', icon: Settings2, lockInSeeding: false, dev: false },
   { to: 'outline', label: '大纲', icon: BookMarked, lockInSeeding: true, dev: false },
@@ -69,6 +70,7 @@ export function ProjectLayout() {
     );
   }
   const seeding = project.status === 'seeding';
+  const continuationReady = !!project.continuationReady;
 
   return (
     <div className="mx-auto flex max-w-[1400px] gap-4 p-4">
@@ -81,7 +83,18 @@ export function ProjectLayout() {
           </div>
         </div>
         {TABS.filter((t) => !t.dev || devMode).map((t) => {
-          const locked = seeding && t.lockInSeeding;
+          const isContinuationTab = t.to === 'continuation';
+          const hiddenForProject =
+            (project.type === 'continuation' && t.to === 'seed') ||
+            (project.type !== 'continuation' && isContinuationTab);
+          if (hiddenForProject) return null;
+          const continuationUnlocked =
+            project.type === 'continuation' &&
+            continuationReady &&
+            (t.to === 'outline' || t.to === 'read' || t.to === 'world' || t.to === 'sim' || t.to === 'inspect' || t.to === 'ledger');
+          const locked =
+            (seeding && t.lockInSeeding && !continuationUnlocked) ||
+            (project.type === 'continuation' && !continuationReady && !isContinuationTab && t.to !== 'world');
           return (
             <NavLink
               key={t.to}
@@ -109,6 +122,14 @@ export function ProjectLayout() {
       </main>
     </div>
   );
+}
+
+export function ProjectHomeRedirect() {
+  const { project } = useProjectCtx();
+  if (project.type === 'continuation') {
+    return <Navigate to={project.continuationReady ? 'outline' : 'continuation'} replace />;
+  }
+  return <Navigate to={project.status === 'seeding' ? 'seed' : 'sim'} replace />;
 }
 
 // 路由级错误边界：任何视图渲染抛错时显示友好页面，而非整页白屏。

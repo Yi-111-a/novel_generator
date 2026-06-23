@@ -1,4 +1,4 @@
-import { Pause, Play, SkipForward, Sparkles, Wand2 } from 'lucide-react';
+import { AlertTriangle, Pause, Play, SkipForward, Sparkles, Wand2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { getAdapter } from '../adapters';
@@ -12,6 +12,7 @@ import type { Beat, Ending, Persona, Thread } from '../types';
 export function Simulation() {
   const { project } = useProjectCtx();
   const devMode = useAppStore((s) => s.devMode);
+  const refreshProjects = useAppStore((s) => s.refreshProjects);
   const adapter = getAdapter();
   const { byProject, subscribe } = useSimStore();
 
@@ -20,6 +21,11 @@ export function Simulation() {
   const [endings, setEndings] = useState<Ending[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [playing, setPlaying] = useState(project.runningSim ?? false);
+  const [pendingDraftId, setPendingDraftId] = useState<number | null>(null);
+  const [pendingChapterNo, setPendingChapterNo] = useState<number | null>(null);
+  const [requireHumanAcceptance, setRequireHumanAcceptance] = useState(false);
+  const [autoPausedReason, setAutoPausedReason] = useState<string | null>(null);
+  const [controlBusy, setControlBusy] = useState(false);
 
   const live = byProject[project.id];
   // 事件流全部来自持久化的 sim store（首次加载历史 + SSE 增量），切换标签不重拉、不刷新
@@ -44,33 +50,74 @@ export function Simulation() {
     adapter.getEndings(project.id).then(setEndings).catch(() => {});
     adapter.getPersonas(project.id).then(setPersonas).catch(() => {});
   };
+  const refetchWritingState = () => {
+    adapter.getStoryBibleStatus(project.id).then((status) => {
+      setPendingDraftId(status.pendingDraftId ?? null);
+      setPendingChapterNo(status.pendingChapterNo ?? null);
+    }).catch(() => {});
+    adapter.getWritingSettings(project.id).then((settings) => {
+      setRequireHumanAcceptance(settings.requireHumanAcceptance);
+    }).catch(() => {});
+  };
   useEffect(() => {
     if (project.status === 'seeding') return;
+    refreshProjects().catch(() => {});
     refetchAggregates();
+    refetchWritingState();
     const id = window.setInterval(refetchAggregates, 8000);
-    return () => window.clearInterval(id);
-  }, [project.id, project.status]); // eslint-disable-line react-hooks/exhaustive-deps
+    const writingId = window.setInterval(refetchWritingState, 5000);
+    const projectRefreshId = window.setInterval(() => { refreshProjects().catch(() => {}); }, 5000);
+    return () => {
+      window.clearInterval(id);
+      window.clearInterval(writingId);
+      window.clearInterval(projectRefreshId);
+    };
+  }, [project.id, project.status, refreshProjects]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (project.status === 'seeding') return <SeedingGate />;
 
   const control = async (a: 'play' | 'pause' | 'step') => {
-    await adapter.control(project.id, a);
-    if (a === 'play') setPlaying(true);
-    if (a === 'pause') setPlaying(false);
+    setControlBusy(true);
+    try {
+      const result = await adapter.control(project.id, a);
+      setPlaying(result.runningSim);
+      setPendingDraftId(result.pendingDraftId ?? null);
+      setPendingChapterNo(result.pendingChapterNo ?? null);
+      setAutoPausedReason(result.autoPausedReason ?? null);
+      await refreshProjects();
+      refetchAggregates();
+      refetchWritingState();
+    } finally {
+      setControlBusy(false);
+    }
   };
 
   const tensionData = allEvents.slice(-30).map((e) => ({ t: e.storyTime, drama: e.dramaScore ?? 0 }));
 
   return (
     <div className="space-y-4">
+      {pendingDraftId && requireHumanAcceptance && !playing && (
+        <div className="panel border border-amber-300/50 bg-amber-50/80 p-3 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              系统已经生成了待验收草稿
+              {pendingChapterNo ? `：第 ${pendingChapterNo} 章。` : '。'}
+              {autoPausedReason === 'pending_acceptance'
+                ? ' 当前已自动暂停，先去大纲页接受或丢弃草稿后才能继续连写。'
+                : ' 当前项目处于待验收暂停状态。'}
+            </div>
+          </div>
+        </div>
+      )}
       {/* 控制台 */}
       <div className="panel flex flex-wrap items-center justify-between gap-3 p-3">
         <div className="flex items-center gap-2">
-          <button className="btn-primary" onClick={() => control(playing ? 'pause' : 'play')}>
+          <button className="btn-primary" onClick={() => control(playing ? 'pause' : 'play')} disabled={controlBusy}>
             {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
             {playing ? '暂停' : '播放'}
           </button>
-          <button className="btn-ghost border border-zinc-200 dark:border-zinc-800" onClick={() => control('step')}>
+          <button className="btn-ghost border border-zinc-200 dark:border-zinc-800" onClick={() => control('step')} disabled={controlBusy}>
             <SkipForward className="h-4 w-4" /> 单步
           </button>
           <span className="ml-2 text-sm text-zinc-500">故事时间 tick = {tick}</span>

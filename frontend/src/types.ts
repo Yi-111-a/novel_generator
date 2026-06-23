@@ -9,16 +9,27 @@ export interface ApiConfig {
 }
 
 export type ProjectStatus = 'seeding' | 'writing' | 'completed';
+export type ProjectType = 'original' | 'continuation';
+
+export interface GenreTemplateCard {
+  id: string;
+  label: string;
+  description: string;
+  world_hints: string[];
+}
 
 export interface Project {
   id: string;
   title: string;
+  type?: ProjectType;
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
   runningSim?: boolean;
   sceneCount?: number; // 仪表盘进度提示
   chapterCount?: number; // 已完成章数
+  continuationReady?: boolean;
+  continuationPhase?: string;
 }
 
 export interface Chapter {
@@ -66,6 +77,7 @@ export interface PlanChapter {
   beatGoals: string[];
   beatPovNames?: string[];     // 每个 beat 的视角人物名（POV 跟着节拍走）
   revealGate: string[];
+  threadDecisions?: ThreadDecision[];
   targetScenes: number;
   role: 'setup' | 'rising' | 'twist' | 'climax' | 'resolution';
   targetTension: number;
@@ -83,6 +95,16 @@ export interface PlanChapter {
   itemsPresentNames?: string[]; // 在场道具名（编辑用）
   locationName?: string;       // 本章地点名（编辑用）
   status: 'planned' | 'active' | 'done';
+}
+
+export interface ThreadDecision {
+  threadId: string;
+  question: string;
+  decision: 'reveal' | 'hint' | 'hide' | string;
+  reason?: string;
+  score?: number;
+  relevance?: number;
+  tension?: number;
 }
 
 export interface EraLogic {
@@ -135,6 +157,240 @@ export interface StyleSkill {
   enabled: boolean;
 }
 
+// S1 Author Writing Sheet (arXiv:2502.13028)
+export interface StyleClaim {
+  claim: string;
+  evidence: string;
+  sourceChapter: string;
+}
+
+export interface AuthorWritingSheet {
+  name: string;
+  sourceGenre: string;
+  plot: StyleClaim[];
+  creativity: StyleClaim[];
+  development: StyleClaim[];
+  language: StyleClaim[];
+  personaMd: string;
+  nSegments: number;
+}
+
+export interface AuthorSheetListItem {
+  id: number;
+  name: string;
+  sourceGenre: string;
+  nSegments: number;
+  createdAt: string;
+}
+
+export interface WritingSettings {
+  targetWords: number;
+  minWords: number;
+  maxWords: number;
+  outlineFirst: boolean;
+  autoChapterCount: number;
+  requireHumanAcceptance: boolean;
+  styleProfileId?: number | null;
+}
+
+export interface ChapterDraft {
+  id: number;
+  chapterNo: number;
+  title: string;
+  outline: string;
+  prose: string;
+  guidance: string;
+  targetWords: number;
+  mode: 'manual' | 'auto';
+    status: 'draft' | 'pending_acceptance' | 'blocked' | 'accepted' | 'rejected';
+  contextSnapshot: Record<string, unknown>;
+  candidateGroupId?: string;
+  stylePacket?: Record<string, unknown>;
+  scoreBreakdown?: Record<string, unknown>;
+  retrievedSegmentIds?: string[];
+  revisionHistory?: Record<string, unknown>[];
+  createdAt: string;
+}
+
+export interface StyleCorpusSummary {
+  segmentCount: number;
+  clusterCount: number;
+  negativeSampleCount: number;
+  disabledSegmentCount?: number;
+  experienceSourceCount?: number;
+  experienceFragmentCount?: number;
+  lifeModel?: Record<string, unknown> | null;
+  discourseCoverage: Record<string, number>;
+  voiceCoverage: Record<string, number>;
+  sceneCoverage: Record<string, number>;
+  registerCoverage?: Record<string, number>;
+  characterVoiceCoverage?: Record<string, number>;
+  lowConfidenceSegments: Array<{
+    id: string;
+    sourceChapterId: number;
+    discourseType: string;
+    voiceType: string;
+    confidence: number;
+    text: string;
+  }>;
+  clusters: Array<{
+    id: string;
+    label: string;
+    clusterType: string;
+    representativeSegmentIds: string[];
+  }>;
+}
+
+export interface ContinuationStyleDiagnostics {
+  corpus: StyleCorpusSummary;
+  latestDraft: null | {
+    id: number;
+    chapterNo: number;
+    candidateGroupId: string;
+    scoreBreakdown: Record<string, unknown>;
+    retrievedSegmentIds: string[];
+    stylePacket: Record<string, unknown>;
+    contextSnapshot: Record<string, unknown>;
+    revisionHistory?: Record<string, unknown>[];
+  };
+}
+
+export interface ChapterAuditCheck {
+  ok: boolean;
+  feedback: string;
+}
+
+export interface ChapterAuditSnapshot {
+  ok: boolean;
+  severity: 'pass' | 'warning' | 'blocker';
+  checks: Record<string, ChapterAuditCheck>;
+  rewriteAdvice: string;
+}
+
+export interface DraftContextSnapshot extends Record<string, unknown> {
+  audit?: ChapterAuditSnapshot;
+  scopeAudit?: ChapterAuditSnapshot & {
+    violations?: Array<{ type: string; text: string; belongs_to_chapter?: number }>;
+    contract?: Record<string, unknown>;
+  };
+}
+
+export interface StoryBibleStatus {
+  status: string;
+  type: ProjectType;
+  pendingDraftId?: number | null;
+  pendingChapterNo?: number | null;
+  continuationReady?: boolean;
+  writeMode?: string;
+  continuationPhase?: string;
+}
+
+export type ContinuationWriteMode = 'continue_current_book' | 'new_series_book';
+
+export interface ContinuationSettings {
+  sourceTextHash: string;
+  continuationHint: string;
+  seriesId: string;
+  sourceBookTitle: string;
+  currentBookTitle: string;
+  bookIndex: number;
+  writeMode: ContinuationWriteMode;
+  chapterStartNo: number;
+  latestSourceChapterNo: number;
+  continuationReady: boolean;
+  continuationPhase: string;
+  timePosition: string;
+  protagonistStrategy: string;
+  inheritUnresolvedThreads: boolean;
+  experienceLayerEnabled: boolean;
+  experienceLayerMode: string;
+  experienceSourcePath: string;
+  experienceStyleLevel: string;
+  activeLifeModelId?: string;
+}
+
+export interface ContinuationJobStatus {
+  id?: string;
+  phase?: string;
+  progress?: number;
+  total?: number;
+  status: string;
+  error?: string;
+  config?: Record<string, unknown>;
+  currentStep?: string;
+  steps?: { code: string; label: string; status: 'pending' | 'running' | 'done' }[];
+  updatedAt?: string;
+}
+
+export interface ContinuationDistillConfig {
+  sampleMode: 'fast' | 'representative' | 'full';
+  graphDetail: 'light' | 'medium' | 'heavy';
+  styleSampleSegments: number;
+  generateAws: boolean;
+  enableStyleSkill: boolean;
+  extractUnresolvedThreads: boolean;
+  extractCharacterEndings: boolean;
+  extractFactionState: boolean;
+  extractExpandableRegions: boolean;
+}
+
+export interface SimulationControlResult {
+  ok: boolean;
+  runningSim: boolean;
+  pendingDraftId?: number | null;
+  pendingChapterNo?: number | null;
+  autoPausedReason?: string | null;
+}
+
+export interface AcceptedChapter {
+  id: number;
+  draftId: number;
+  chapterNo: number;
+  title: string;
+  prose: string;
+  summary: string;
+  createdAt: string;
+}
+
+export interface SourceChapter {
+  id: number;
+  chapterNo: number;
+  title: string;
+  text: string;
+  wordCount: number;
+  summary: string;
+}
+
+export interface StoryBibleV2 {
+  sourceType: ProjectType;
+  titleStyle: Record<string, unknown>;
+  worldConfig: Record<string, unknown>;
+  characters: Record<string, unknown>[];
+  locations: Record<string, unknown>[];
+  factions: Record<string, unknown>[];
+  items: Record<string, unknown>[];
+  relationships: Record<string, unknown>[];
+  timeline: Record<string, unknown>[];
+  openThreads: Record<string, unknown>[];
+  lastState: Record<string, unknown>;
+  narrativeConstraints: Record<string, unknown>;
+  styleProfileId?: number | null;
+  updatedAt: string;
+}
+
+export interface CharacterNamingRecord {
+  agentId: string;
+  primaryName: string;
+  displayNameLocked: string;
+  shortName: string;
+  nickname: string;
+  honorific: string;
+  publicAlias: string;
+  enemyLabel: string;
+  cultureStyleId: string;
+  auditFlags: string[];
+}
+
 export interface BibleSection {
   id: number;
   section: string;
@@ -157,7 +413,15 @@ export interface RevealNode {
   discoveredChapter?: number | null;
 }
 
-export interface PlanLocation {
+export interface DisclosureFields {
+  foreshadowFrom?: number;
+  revealChapter?: number;
+  secretRevealChapter?: number;
+  foreshadowHint?: string;
+  secretTruth?: string;
+}
+
+export interface PlanLocation extends DisclosureFields {
   locId: string;
   partId?: string | null;
   name: string;
@@ -173,12 +437,13 @@ export interface PlanLocation {
   detail?: string;
 }
 
-export interface CharacterCard {
+export interface CharacterCard extends DisclosureFields {
   cardId: string;
   agentId?: string | null;
   tier: 'lead' | 'supporting' | 'extra' | string;
   slotKey?: string | null;
   name: string;
+  displayName?: string;
   oneLiner: string;
   voiceRegister: string;
   definingTrait: string;
@@ -208,7 +473,7 @@ export interface FactionRelation {
   note?: string;
 }
 
-export interface Faction {
+export interface Faction extends DisclosureFields {
   factionId: string;
   name: string;
   ideology: string;
@@ -236,17 +501,24 @@ export interface InventoryItem {
 
 export interface ProjectPlan {
   planned: boolean;
+  continuation?: boolean;
   toneProfile?: ToneProfile | null;
   styleSkill?: StyleSkill | null;
   parts: PlanPart[];
-  arcs: PlanArc[];
-  chapters: PlanChapter[];
+  arcs: any[];
+  chapters: any[];
   revealChain: RevealNode[];
   inventory: InventoryItem[];
   locations?: PlanLocation[];
   factions?: Faction[];
   characterCards?: CharacterCard[];
   bibleSections?: BibleSection[];
+  // 完全蒸馏（续写）
+  foreshadows?: any[];
+  openThreads?: any[];
+  sourceEvents?: any[];
+  codex?: any[];
+  storyArcs?: any[];
 }
 
 export interface Dossier {
@@ -278,6 +550,7 @@ export interface Ending {
 export interface Persona {
   id: string;
   name: string;
+  displayName?: string;
   want: string;
   values: { name: string; weight: number }[];
   fatalFlaw: string;

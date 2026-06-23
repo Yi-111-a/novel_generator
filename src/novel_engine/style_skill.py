@@ -136,12 +136,36 @@ def _profile_from_data(data: dict, fallback_samples: list[str], metrics: dict) -
     )
 
 
-def distill_from_works(llm: LLMClient | None, raw_text: str, name: str = "", source: str = "") -> StyleProfile:
-    """入口A：上传作品原文 → 蒸馏文风 + 量化指纹。无 LLM 时仅出指纹 + 原文样例。"""
+def distill_from_works(
+    llm: LLMClient | None, raw_text: str, name: str = "", source: str = "",
+    *,
+    use_aws: bool = True,
+    genre: str = "",
+    on_progress=None,
+) -> StyleProfile:
+    """入口A：上传作品原文 → 蒸馏文风 + 量化指纹。
+
+    use_aws=True 时走 AWS 管线（A0→A1→A2 → derive_style_profile），
+    否则走旧的单次 LLM 蒸馏（兼容旧路径）。无 LLM 时仅出指纹 + 原文样例。
+    """
     metrics = compute_style_metrics(raw_text)
     fallback = _excerpts(raw_text)
     if llm is None:
         return StyleProfile(name=name, source=source, samples=fallback, metrics=metrics, enabled=True)
+
+    if use_aws:
+        from .style.sheet_distiller import distill_author_sheet
+        from .style.author_sheet import derive_style_profile
+        sheet = distill_author_sheet(llm, raw_text, name=name, genre=genre,
+                                     on_progress=on_progress)
+        prof = derive_style_profile(sheet, raw_text[:4000], llm)
+        if name and not prof.name:
+            prof.name = name
+        if source and not prof.source:
+            prof.source = source
+        prof.metrics = metrics
+        return prof
+
     data = _distill_json(
         llm,
         "你是文体测量学专家。阅读给定作品原文，**只提炼它的写作腔调**（不要复述情节）。"

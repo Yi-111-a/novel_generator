@@ -5,7 +5,7 @@
   ② 解离反推验证（关键场——本场有揭示时——独立第二次低温 LLM）：
      仅凭正文，读者能否合理推出本场揭开的真相？正文没铺垫就凭空抛结论 = 因果链断裂（语义三角测定）。
 
-不过 → 反馈给 director，由 SceneWriter 带反馈重写一次。约束层用 temperature=0。无 LLM → 宽松放行。
+不过 → 反馈给上层写作流程，由 SceneWriter 带反馈重写一次。约束层用 temperature=0。无 LLM → 宽松放行。
 """
 from __future__ import annotations
 

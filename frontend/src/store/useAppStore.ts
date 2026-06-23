@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { getAdapter } from '../adapters';
-import type { ApiConfig, Project } from '../types';
+import type { ApiConfig, GenreTemplateCard, Project, ProjectType } from '../types';
 
 interface AppState {
   // 全局偏好（持久化）
@@ -19,9 +19,13 @@ interface AppState {
   // 项目列表
   projects: Project[];
   refreshProjects: () => Promise<void>;
-  createProject: (title: string) => Promise<Project>;
+  createProject: (title: string, type?: ProjectType, templateId?: string) => Promise<Project>;
   renameProject: (id: string, title: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
+
+  // 题材模板
+  templates: GenreTemplateCard[];
+  refreshTemplates: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>()(
@@ -54,10 +58,19 @@ export const useAppStore = create<AppState>()(
       refreshProjects: async () => {
         set({ projects: await getAdapter().listProjects() });
       },
-      createProject: async (title) => {
-        const p = await getAdapter().createProject(title);
+      createProject: async (title, type = 'original', templateId = '') => {
+        const p = await getAdapter().createProject(title, type, templateId);
         await get().refreshProjects();
         return p;
+      },
+
+      templates: [],
+      refreshTemplates: async () => {
+        try {
+          set({ templates: await getAdapter().listTemplates() });
+        } catch {
+          set({ templates: [] });
+        }
       },
       renameProject: async (id, title) => {
         await getAdapter().renameProject(id, title);
