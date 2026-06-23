@@ -13,6 +13,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.log
+.venv/
+venv/
 
 # Data / runtime
 server/.data/
@@ -24,6 +26,20 @@ scripts/out_*.txt
 scripts/seed*.log
 scripts/read*.txt
 scripts/first5.txt
+scripts/plan_dump.json
+scripts/plan_v*.json
+scripts/yunhai_v*.json
+scripts/.zhutian_new_pid
+
+# Generated novel artifacts / runtime output
+outputs/
+drafts/
+*.db
+_*.json
+
+# Source corpus (copyrighted, do not commit)
+*.epub
+龙族1.txt
 
 # Node / frontend build
 frontend/node_modules/
