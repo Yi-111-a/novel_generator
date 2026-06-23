@@ -10,6 +10,7 @@ import uuid
 
 from .llm.base import LLMClient
 from .models import CharacterCard, Entity, InventoryItem, Persona
+from .naming_generator import assign_character_name
 from .repository import Repository
 
 # 显式化名/代号：从种子文本确定性抽取（治"种子写了化名秦书白却没人用"）。
@@ -118,16 +119,23 @@ def cast_or_get(repo: Repository, slot_key: str, tier: str = "supporting",
             repo.insert_entity(Entity(obj, "object", obj, {}))
         if repo.get_inventory_item(obj) is None:
             repo.set_inventory(InventoryItem(obj, holder_agent_id=agent_id, status="held"))
+    assign_character_name(repo, agent_id, source="llm")
     return card
 
 
 def ensure_cards_for_personas(repo: Repository) -> list[str]:
     """锁定时为种子已知角色批量建卡：personas[0]=lead，其余=supporting。幂等。"""
     out: list[str] = []
-    for i, p in enumerate(repo.list_personas()):
+    personas = repo.list_personas()
+    has_lead = any(c.tier == "lead" for c in repo.list_cards())
+    lead_agent = next((p.agent_id for p in personas if not p.agent_id.startswith("cast_")),
+                      personas[0].agent_id if personas else "")
+    for i, p in enumerate(personas):
         if repo.get_card_for_agent(p.agent_id):
             continue
-        tier = "lead" if i == 0 else "supporting"
+        tier = "lead" if (not has_lead and p.agent_id == lead_agent) else "supporting"
+        if tier == "lead":
+            has_lead = True
         trait = (p.values[0]["name"] if p.values else "") or p.fatal_flaw or "（待定）"
         repo.add_card(CharacterCard(
             card_id=f"card_{uuid.uuid4().hex[:8]}", agent_id=p.agent_id, tier=tier,
@@ -137,6 +145,7 @@ def ensure_cards_for_personas(repo: Repository) -> list[str]:
             core_desire=p.want, verbal_habits="、".join(p.mannerisms),
             fatal_flaw=p.fatal_flaw, motif_objects=p.motif_objects, arc="",
         ))
+        assign_character_name(repo, p.agent_id, source="seed")
         out.append(p.agent_id)
     return out
 
@@ -607,6 +616,7 @@ def cast_named_characters(repo: Repository, bible_text: str, want_text: str,
             sfid = f"f_named_{uuid.uuid4().hex[:6]}"
             repo.append_fact(Fact(sfid, "state", str(secret), involved_entities=[agent_id]))
             repo.insert_knowledge(KnowledgeItem(agent_id, sfid, str(secret), 1.0, 0))
+        assign_character_name(repo, agent_id, source="llm")
         existing_names.append(name)
         name_to_aid[name] = agent_id
         out.append(name)
@@ -687,3 +697,51 @@ def _fallback_card_spec(slot_key: str, tier: str, repo: Repository) -> dict:
         "motif_objects": [],
         "arc": "",
     }
+
+
+def promote_faction_members_to_personas(repo: Repository) -> int:
+    """把势力核心成员（W3 落卡的 named_ 实体）登记为轻量配角 persona，使其可被章节选角。
+
+    根因修复：选角池只认 list_personas()，而势力成员只是 entity+card → 永远进不了 cast。
+    本函数据其 CharacterCard / key_member 信息派生一个 Persona（want/voice/flaw），
+    并确保 entity.attributes.faction_id 已写实。纯本地、幂等、无 LLM。返回新建 persona 数。
+    """
+    existing = {p.agent_id for p in repo.list_personas()}
+    created = 0
+    for fac in repo.list_factions():
+        for m in (fac.key_members or []):
+            aid = m.get("agent_id")
+            if not aid or aid in existing:
+                continue
+            ent = repo.get_entity(aid)
+            if ent is None or ent.type != "character":
+                continue
+            # 确保势力归属写实（选角的势力相关性判定依赖它）
+            attrs = dict(ent.attributes or {})
+            if not attrs.get("faction_id"):
+                attrs["faction_id"] = fac.faction_id
+                repo.update_entity_attributes(aid, attrs)
+            card = repo.get_card_for_agent(aid)
+            role = m.get("role", "") or (card.defining_trait if card else "")
+            note = m.get("note", "") or (card.backstory if card else "")
+            want = (card.core_desire if card and getattr(card, "core_desire", "") else "") or \
+                   f"维护{fac.name}的利益与自身在其中的位置"
+            voice = (card.voice_register if card and getattr(card, "voice_register", "") else "") or "言辞利落"
+            repo.insert_persona(Persona(
+                agent_id=aid,
+                name=ent.name,
+                want=want,
+                values=[{"name": "忠于所属势力", "weight": 0.6}],
+                fatal_flaw=(card.fatal_flaw if card and getattr(card, "fatal_flaw", "") else ""),
+                obstacles=[],
+                cost_threshold={"note": ""},
+                voice=voice,
+                mannerisms=[],
+                motif_objects=[],
+                arc_state={"last_change_tick": 0, "last_flaw_cost_tick": 0, "changed": False,
+                           "minor": True, "faction_id": fac.faction_id, "role": role, "note": note},
+                cost_ledger=[],
+            ))
+            existing.add(aid)
+            created += 1
+    return created

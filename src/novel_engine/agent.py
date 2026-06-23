@@ -113,13 +113,25 @@ class CharacterAgent:
     def _profile(self, agent_id: str, persona: Persona) -> dict[str, str]:
         """身份画像：优先角色卡（§1 选角层），回退 persona。card 缺失时不报错（向前兼容）。"""
         card = None
+        name_record = None
         getter = getattr(self.repo, "get_card_for_agent", None)
         if getter is not None:
             try:
                 card = getter(agent_id)
             except Exception:
                 card = None
-        name = (card.name if card and card.name else persona.name)
+        get_name = getattr(self.repo, "get_character_name", None)
+        if get_name is not None:
+            try:
+                name_record = get_name(agent_id)
+            except Exception:
+                name_record = None
+        display_name = (
+            name_record.public_alias
+            if name_record and getattr(name_record, "public_alias", "")
+            else ""
+        )
+        name = display_name or (card.name if card and card.name else persona.name)
         one_liner = (card.one_liner if card and getattr(card, "one_liner", "") else "")
         # 本性：定义性特征 + 致命弱点 + 核心欲望 + 珍视（有什么用什么）
         bits: list[str] = []

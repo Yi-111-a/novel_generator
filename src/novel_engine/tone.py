@@ -100,19 +100,33 @@ DEFAULT_GENRE = "literary"
 
 
 def _norm_genre(genre: str | None) -> str:
-    g = (genre or "").strip().lower()
+    raw = (genre or "").strip()
+    g = raw.lower()
     if g in GENRE_PRESETS:
         return g
-    # 中文/别名宽松匹配
-    alias = {
-        "喜剧": "comedy", "搞笑": "comedy",
-        "恐怖": "horror", "惊悚": "horror",
-        "爽文": "xuanhuan_powerfantasy", "玄幻": "xuanhuan_powerfantasy", "网文": "xuanhuan_powerfantasy",
-        "悲剧": "tragedy",
-        "悬疑": "mystery", "推理": "mystery",
-        "文学": "literary", "纯文学": "literary",
-    }
-    return alias.get((genre or "").strip(), g if g in GENRE_PRESETS else DEFAULT_GENRE)
+    # 中文/别名宽松匹配：用户写「玄幻仙侠 / 反传统反派养成 / 爽文+黑色幽默」这种复合串很常见，
+    # 必须按"任一关键词出现"匹配，否则一律回落 literary（禁爽点）就是"古风文绉绉"的根因。
+    # 顺序=优先级：具体类型词优先于通用"文学"。
+    ordered: list[tuple[str, str]] = [
+        ("爽文", "xuanhuan_powerfantasy"),
+        ("玄幻", "xuanhuan_powerfantasy"),
+        ("仙侠", "xuanhuan_powerfantasy"),
+        ("修真", "xuanhuan_powerfantasy"),
+        ("网文", "xuanhuan_powerfantasy"),
+        ("搞笑", "comedy"),
+        ("喜剧", "comedy"),
+        ("惊悚", "horror"),
+        ("恐怖", "horror"),
+        ("悲剧", "tragedy"),
+        ("推理", "mystery"),
+        ("悬疑", "mystery"),
+        ("纯文学", "literary"),
+        ("文学", "literary"),
+    ]
+    for kw, target in ordered:
+        if kw in raw:
+            return target
+    return g if g in GENRE_PRESETS else DEFAULT_GENRE
 
 
 def _preset_profile(genre: str, theme: str = "") -> ToneProfile:
@@ -162,19 +176,32 @@ def build_tone_profile(
     genre: str = "",
     theme: str = "",
     setting_hint: str = "",
+    template_id: str = "",
 ) -> ToneProfile:
     """锁定第一步（闸门⓪）：生成文风契约并写入 DB（未确认状态，等用户确认）。
 
     幂等：若已存在已确认的契约则直接返回（只读保护）。
-    LLM 优先（据题材+主题写出 tone_reference 与各参数）；缺字段用该题材预设补全；
-    无 LLM / 解析失败 → 全量走预设。
+    template_id 指定题材模板 → 按模板覆盖预设字段，结构化约定更厚（如系统拟人 NPC、
+    章节钩子词）。**模板覆盖优先于 LLM**：如果模板已经写死了某字段（register/
+    tone_reference 等），LLM 输出对这些字段就不再生效，避免 LLM 把成熟范式稀释成"通用感"。
+    未传 template_id → 退回旧链路：_norm_genre + GENRE_PRESETS + LLM 增强。
     """
     existing = repo.get_tone_profile()
     if existing.confirmed:
         return existing
 
-    g = _norm_genre(genre)
-    profile = _preset_profile(g, theme)
+    # ① 模板优先：按模板 tone_overrides 推断 genre + 写好的预设字段
+    from . import templates as _tmpls
+    tmpl = _tmpls.get(template_id)
+    if tmpl is not None:
+        ov = tmpl.tone_overrides
+        g = _norm_genre(ov.get("genre") or genre)
+        profile = _preset_profile(g, theme)
+        # 用模板字段覆盖预设（字符串非空 / 列表非空 才覆盖，与 _merge_into_preset 同语义）
+        profile = _apply_overrides(profile, ov)
+    else:
+        g = _norm_genre(genre)
+        profile = _preset_profile(g, theme)
 
     if llm is not None:
         data = _complete_json(
@@ -200,9 +227,47 @@ def build_tone_profile(
         )
         if isinstance(data, dict):
             profile = _merge_into_preset(profile, data)
+            # 模板已写死的字段，LLM 不得稀释——再次覆盖一次
+            if tmpl is not None:
+                profile = _apply_overrides(profile, tmpl.tone_overrides)
 
     repo.set_tone_profile(profile)
     return profile
+
+
+def _apply_overrides(base: ToneProfile, ov: dict) -> ToneProfile:
+    """把模板的 tone_overrides 应用到 ToneProfile：字符串/列表只在非空时覆盖。
+    与 _merge_into_preset 共用同一套语义；era_logic 用 dict 整体替换。"""
+    def s(key, default):
+        v = ov.get(key)
+        return v.strip() if isinstance(v, str) and v.strip() else default
+
+    def lst(key, default):
+        v = ov.get(key)
+        if isinstance(v, list):
+            out = [str(x).strip() for x in v if str(x).strip()]
+            if out:
+                return out
+        return default
+
+    el = ov.get("era_logic")
+    era_logic = el if isinstance(el, dict) else base.era_logic
+    return ToneProfile(
+        genre=s("genre", base.genre),
+        primary_effect=s("primary_effect", base.primary_effect),
+        register=s("register", base.register),
+        sentence_rhythm=s("sentence_rhythm", base.sentence_rhythm),
+        diction_do=lst("diction_do", base.diction_do),
+        diction_dont=lst("diction_dont", base.diction_dont),
+        device_kit=lst("device_kit", base.device_kit),
+        pacing=s("pacing", base.pacing),
+        tension_curve_bias=s("tension_curve_bias", base.tension_curve_bias),
+        reveal_cadence=s("reveal_cadence", base.reveal_cadence),
+        complexity=s("complexity", base.complexity),
+        tone_reference=s("tone_reference", base.tone_reference),
+        confirmed=base.confirmed,
+        era_logic=era_logic,
+    )
 
 
 def _merge_into_preset(base: ToneProfile, data: dict) -> ToneProfile:

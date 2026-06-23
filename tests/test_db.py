@@ -19,3 +19,14 @@ def test_facts_events_are_append_only_at_repo_layer():
     assert forbidden.isdisjoint(public)
     # facts/events 只暴露 append_*
     assert "append_fact" in public and "append_event" in public
+
+
+def test_build_checkpoints_round_trip():
+    repo = Repository(db.connect(":memory:"))
+    assert repo.get_build_checkpoints() == {}
+    repo.mark_build_checkpoint("W1_world_skill", "running", meta={"llmLogs": 2})
+    assert repo.build_checkpoint_status("W1_world_skill") == "running"
+    repo.mark_build_checkpoint("W1_world_skill", "done", meta={"llmLogs": 3})
+    checkpoints = repo.get_build_checkpoints()
+    assert checkpoints["W1_world_skill"]["status"] == "done"
+    assert checkpoints["W1_world_skill"]["meta"]["llmLogs"] == 3

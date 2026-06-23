@@ -6,12 +6,15 @@ source='llm_expanded' 的「详述」companion；`bible_sections_text` 会把原
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
 
 from .llm.base import LLMClient
 from .models import CharacterCard, Entity, Faction, GraphEdge, Location
 from .repository import Repository
+from .chapter_scope_validator import contains_plotting_content
 
 _SECTION_CN = {
     "settingCore": "设定内核", "geography": "地理", "culture": "文化/势力/禁忌",
@@ -27,6 +30,45 @@ _W1_SECTIONS: dict[str, str] = {
     "history": "历史大事年表", "language": "语言/称谓", "economy": "经济/民生",
 }
 _W1_BASE = ("settingCore", "rules", "geography", "culture")  # detail 须 ≥300–800 字
+
+_ORG_RE = re.compile(r"[\u4e00-\u9fff]{2,18}(?:公司|集团|售后局|局|支队|仲裁庭|医院|学校|协会|宗|门|阁|会|帮|盟)")
+
+_YIN_YANG_FACTION_HINTS: dict[str, dict[str, str]] = {
+    "无忧售后服务有限公司": {
+        "ideology": "以人间门店身份承接阴阳售后局的亡者差评工单。",
+        "summary": "陈野接手的破店，也是主角团在人间处理死人差评的据点。",
+    },
+    "阴阳售后局": {
+        "ideology": "以工单、差评和五星结算维持阴阳因果售后秩序。",
+        "summary": "死人差评系统背后的阴间职能部门，给陈野派单、发奖励，也限制他不能越权。",
+    },
+    "江州市刑警支队": {
+        "ideology": "只承认可提交证据的阳间执法秩序。",
+        "summary": "沈知夏所在的阳间办案系统，前期怀疑陈野，中期会被迫与无忧售后形成特殊协作。",
+    },
+    "天命咨询公司": {
+        "ideology": "把寿命、身份和死劫当作可交易资源。",
+        "summary": "长线反派势力，替富人改命、借寿、替死，批量制造亡者差评。",
+    },
+    "地府仲裁庭": {
+        "ideology": "以阴司条例审理跨阴阳因果纠纷。",
+        "summary": "终局级裁决机构，平时只以后台、梦境传票和回执压力投影到阳间。",
+    },
+}
+
+
+def _clean_seed_org_name(name: str) -> str:
+    name = name.strip("，。；：、（）()《》「」“”")
+    for known in _YIN_YANG_FACTION_HINTS:
+        if known in name:
+            return known
+    if "有一家" in name:
+        name = name.rsplit("有一家", 1)[-1]
+    if "的" in name:
+        tail = name.rsplit("的", 1)[-1]
+        if 2 <= len(tail) <= 18:
+            name = tail
+    return name.strip("，。；：、（）()《》「」“”")
 
 
 def _json(llm: LLMClient, system: str, user: str, expect_list: bool = False):
@@ -47,6 +89,89 @@ def _json(llm: LLMClient, system: str, user: str, expect_list: bool = False):
             except Exception:
                 return None
         return None
+
+
+def sanitize_worldbuilding_text(text: str) -> tuple[str, str]:
+    """Separate reusable world canon from plot-shaped demonstrations."""
+    source = (text or "").strip()
+    if not source:
+        return "", ""
+    canon: list[str] = []
+    planning: list[str] = []
+    for sentence in re.split(r"(?<=[。！？；\n])", source):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if contains_plotting_content(sentence):
+            planning.append(sentence)
+        else:
+            canon.append(sentence)
+    return "".join(canon).strip(), "\n".join(planning).strip()
+
+
+def _store_planning_notes(repo: Repository, text: str, source: str) -> None:
+    if text.strip():
+        repo.add_bible_section(
+            "planning_notes",
+            "剧情化内容隔离记录",
+            text,
+            source=source,
+        )
+
+
+def seed_factions_from_world_bible(repo: Repository, world_bible: dict | None = None,
+                                  max_factions: int = 5) -> dict:
+    """Deterministic fallback so the project never has an empty faction layer.
+
+    W3 uses an LLM and canon geography; if either is unavailable or an upstream
+    world-building step fails, leaving ``factions`` empty makes the UI and
+    casting layer look hollow. This extracts named organizations from the seed
+    text and stores them as lightweight first-class factions.
+    """
+    if repo.list_factions():
+        return {"skipped": "exists"}
+    wb = world_bible or {}
+    source = "\n".join(
+        str(wb.get(k, "") or "")
+        for k in ("settingCore", "geography", "culture", "history", "protagonistWant", "theme")
+    )
+    if not source.strip():
+        source = repo.bible_sections_text(["settingCore", "geography", "culture", "history"], max_chars=5000)
+    names: list[str] = []
+    for name in _YIN_YANG_FACTION_HINTS:
+        if name in source:
+            names.append(name)
+    for name in _ORG_RE.findall(source):
+        name = _clean_seed_org_name(name)
+        if len(name) < 2 or name in names:
+            continue
+        if name.endswith(("医院", "学校")) and not any(x in name for x in ("阴", "地府")):
+            continue
+        names.append(name)
+        if len(names) >= max_factions:
+            break
+    created = 0
+    for name in names[:max_factions]:
+        hint = _YIN_YANG_FACTION_HINTS.get(name, {})
+        fid = f"fac_{hashlib.md5(name.encode('utf-8')).hexdigest()[:8]}"
+        repo.upsert_faction(Faction(
+            faction_id=fid,
+            name=name,
+            ideology=hint.get("ideology", "围绕世界观核心规则运作的具名组织。"),
+            goals=hint.get("ideology", ""),
+            methods="由种子世界观点名，具体手段随剧情按卷展开。",
+            territory=[],
+            structure="种子兜底生成，待后续世界观深化补全层级。",
+            key_members=[],
+            history="只记录开局前已知的组织背景；未来剧情不得提前当作既定历史。",
+            relations=[],
+            secret="",
+            summary=hint.get("summary", f"种子世界观中点名的组织：{name}。"),
+            detail=hint.get("summary", ""),
+            source="seed_fallback",
+        ))
+        created += 1
+    return {"factions": created}
 
 
 def build_world_skill(repo: Repository, llm: LLMClient | None = None, theme: str = "") -> dict:
@@ -95,7 +220,8 @@ def build_world_skill(repo: Repository, llm: LLMClient | None = None, theme: str
         own = repo.bible_sections_text([k], max_chars=1200)
         det_sys = (
             f"你是小说世界观设定师。【任务：深写】section={k}（{cn}）。把这一节写成具体、可被反复调用的设定，"
-            f"{target}{tone_hint}。给出具体的地名/势力名号/规矩/禁忌/典型场景的声光气味；"
+            f"{target}{tone_hint}。给出具体的地名/势力名号/规矩/禁忌/日常运行状态与环境感官；"
+            "**这里只写开篇前已经成立的世界设定，禁止使用本书角色演示案件，禁止写未来剧情、真凶、证据、反转、章节过程或案件解决步骤**；"
             "**保留并自然延展草稿原意，不得新增与其它节冲突的设定、不跑题**。只输出这一节的正文，不要标题/解释。"
         )
         det_user = (f"主题：{theme or '（未定）'}\n\n[本节草稿原文]\n{own or '（草稿未提，据下方各节概述与主题补全）'}\n\n"
@@ -143,8 +269,12 @@ def build_world_skill(repo: Repository, llm: LLMClient | None = None, theme: str
 
     # 落库：每节一条权威 w1 行
     for k, cn in secs:
-        if details.get(k, "").strip():
-            repo.upsert_w1_section(k, cn, summaries.get(k, ""), details[k])
+        clean, planning = sanitize_worldbuilding_text(details.get(k, ""))
+        _store_planning_notes(repo, planning, source="w1_sanitizer")
+        if clean:
+            clean_summary, summary_planning = sanitize_worldbuilding_text(summaries.get(k, ""))
+            _store_planning_notes(repo, summary_planning, source="w1_sanitizer")
+            repo.upsert_w1_section(k, cn, clean_summary, clean)
     return {"sections": len(secs), "issues": len(issues), "fixed": len(fixed)}
 
 
@@ -202,7 +332,8 @@ def expand_world_bible(repo: Repository, llm: LLMClient | None = None,
         cn = _SECTION_CN.get(sec, sec)
         system = (
             f"你是小说世界观设定师。基于主题与已有的【{cn}】简述，把它**扩写得更具体、可被反复调用**："
-            "给出具体的地名/街区/势力名号/规矩与禁忌/典型场景的声光气味，**保留并自然延展原意**，"
+            "给出具体的地名/街区/势力名号/规矩与禁忌/日常运行状态和环境感官，**保留并自然延展原意**，"
+            "**禁止使用本书角色演示案件，禁止写未来剧情、真凶、证据、反转、章节过程或案件解决步骤**，"
             "**不得**新增与原意冲突的设定、不得跑题。300-600 字，只输出扩写正文，不要标题或解释。"
         )
         user = f"主题：{theme or '（未定）'}\n\n已有【{cn}】简述：\n{cur}\n\n请扩写。"
@@ -287,6 +418,8 @@ def build_geography(repo: Repository, llm: LLMClient | None = None, theme: str =
             f"detail(方位/地形/气候/建筑/声光气味，120–300 字) + culture_local(本地风土人情/"
             f"常驻人群/典型活动，60–180 字){tone_hint}。**保留并自然延展既有 geo_full，"
             "严格符合世界观，不得新增与设定冲突的奇幻元素**。"
+            "**只写日常运行状态、环境感官和社会习俗；禁止使用本书角色或案件，"
+            "禁止写具体章节过程、证据、未来场景、凶手操作或解决步骤。**"
             "只输出 JSON：{\"detail\":\"\",\"culture_local\":\"\"}"
         )
         det_user = (
@@ -350,11 +483,15 @@ def build_geography(repo: Repository, llm: LLMClient | None = None, theme: str =
     for loc in canon_locs:
         ov = overview[loc.loc_id]
         det = details[loc.loc_id]
+        clean_summary, p1 = sanitize_worldbuilding_text(ov["summary"])
+        clean_detail, p2 = sanitize_worldbuilding_text(det["detail"])
+        clean_culture, p3 = sanitize_worldbuilding_text(det["culture_local"])
+        _store_planning_notes(repo, "\n".join(x for x in (p1, p2, p3) if x), "w2_sanitizer")
         repo.enrich_location(
             loc_id=loc.loc_id,
-            summary=ov["summary"],
-            detail=det["detail"],
-            culture_local=det["culture_local"],
+            summary=clean_summary,
+            detail=clean_detail,
+            culture_local=clean_culture,
             level=ov["level"],
             parent=ov["parent"],
         )
@@ -400,6 +537,8 @@ def build_factions(repo: Repository, llm: LLMClient | None = None, theme: str = 
         "你是小说世界观势力设定师。【任务：总览】据世界观与地理，给出 3–5 个独特、"
         f"互有张力的势力。{tone_hint}**据地理因地制宜**：territory 必须从 canon loc_id 中选。"
         "**严格符合世界观，不得编造与设定冲突的奇幻势力**。"
+        "**保留点名势力·硬约束**：若世界观文本里已用具名的本地势力（任何被明确叫出名字的"
+        "宗门/帮派/会社/组织），**必须沿用原名**，不得换成你自己起的别名或同义改写。"
         "只输出 JSON：{\"factions\":[{\"name\":\"\",\"ideology\":\"\",\"territory\":[loc_id,…]}]}"
     )
     over = _json(llm, over_sys,
@@ -431,6 +570,8 @@ def build_factions(repo: Repository, llm: LLMClient | None = None, theme: str = 
             "secret(不可告人的事)、key_members([{name,role,note}] 3–6 个核心成员，"
             "给定 role 如领袖/副官/打手/情报头子等)。"
             "**保持与其它势力差异化，不雷同**；**严格符合世界观与地理**。"
+            "**只写开篇前已成立的组织状态；禁止写本书案件、未来章节、具体证据、"
+            "真凶操作流程、案件解决步骤或卷末结局。**"
             "只输出 JSON。"
         )
         det_user = (f"[世界观锚]\n{world_blob}\n\n[本势力地盘]\n{terr_names}\n\n"
@@ -498,13 +639,20 @@ def build_factions(repo: Repository, llm: LLMClient | None = None, theme: str = 
     for i, f in enumerate(overview):
         fid = f"fac_{uuid.uuid4().hex[:6]}"
         faction_ids.append(fid)
+        clean_fields: dict[str, str] = {}
+        planning_bits: list[str] = []
+        for key in ("goals", "methods", "structure", "history", "secret", "summary", "detail"):
+            clean_fields[key], planning = sanitize_worldbuilding_text(details[i][key])
+            if planning:
+                planning_bits.append(planning)
+        _store_planning_notes(repo, "\n".join(planning_bits), "w3_sanitizer")
         repo.upsert_faction(Faction(
             faction_id=fid, name=f["name"], ideology=f["ideology"],
-            goals=details[i]["goals"], methods=details[i]["methods"],
-            territory=f["territory"], structure=details[i]["structure"],
-            key_members=details[i]["key_members"], history=details[i]["history"],
-            relations=[], secret=details[i]["secret"],
-            summary=details[i]["summary"], detail=details[i]["detail"],
+            goals=clean_fields["goals"], methods=clean_fields["methods"],
+            territory=f["territory"], structure=clean_fields["structure"],
+            key_members=details[i]["key_members"], history=clean_fields["history"],
+            relations=[], secret=clean_fields["secret"],
+            summary=clean_fields["summary"], detail=clean_fields["detail"],
             source="w3",
         ))
 
@@ -569,8 +717,98 @@ def build_factions(repo: Repository, llm: LLMClient | None = None, theme: str = 
         fac.key_members = new_members
         repo.upsert_faction(fac)
 
+    # ⑦ 远景势力扫描：setting_core 里点名的远方宗门（主角原师门等）+ 推断"九大正派"全员，
+    # 全部以 source='w3_far'、territory=[]、key_members=[] 落 lightweight faction，
+    # 让后续 planner/writer 在引用远景势力时有**固定名单**可挑，避免 LLM 自由发挥导致漂移。
+    # 这一步专门治"种子里说九大正派/主角原师门，结果 factions 表里压根没有"的设定空白。
+    far_added = _scan_and_add_far_factions(repo, llm, world_blob)
+
     return {"factions": len(faction_ids), "issues": len(issues), "fixed": len(fixed),
-            "relations": len(edges), "members_created": members_created}
+            "relations": len(edges), "members_created": members_created,
+            "far_factions": far_added}
+
+
+def _scan_and_add_far_factions(repo: Repository, llm: LLMClient, world_blob: str) -> int:
+    """从世界观文本里抽出"被点名但尚未实体化"的远景势力（典型：主角原师门、远方反派联盟、
+    设定提到的 N 大宗门里其余 N-1 个具名）。每个生成 lightweight far-faction：
+    只有 name + ideology + summary，无 territory / key_members / relations，
+    source='w3_far'，让 planner/writer 后续从这个固定白名单里挑名字。
+
+    幂等：已有同名 faction（含 w3 / w3_far）则跳过。"""
+    existing_names = {f.name for f in repo.list_factions()}
+    data = _json(
+        llm,
+        "你是世界观考据师。任务两步："
+        "①从给定文本里**抽出所有被明确点名的远景势力/宗门/帮派/组织/联盟名字**。"
+        "②如果文本里出现\"N 大正派\"\"N 大宗门\"\"N 个城邦组成 X 联盟\"\"N 家家族共治\"等"
+        "**数字暗示了一个未完全列出的群组**，**补全剩余 N-1 个具体名字**（已知的算一个，其余你来命名）——"
+        "名字风格须与世界观（题材/语域）一致、各异、有辨识度。"
+        "对每个势力给出一句 ideology（教义/特色）和一句 summary（一句话定位）。"
+        "无该类数字暗示则 alliance_members 数组留空。"
+        "只输出 JSON："
+        "{\"explicitly_named\":[{\"name\":\"\",\"ideology\":\"\",\"summary\":\"\"}],"
+        "\"alliance_members\":[{\"name\":\"\",\"ideology\":\"\",\"summary\":\"\"}]}",
+        f"[世界观文本]\n{world_blob[:2000]}\n\n只输出 JSON。",
+    )
+    if not isinstance(data, dict):
+        return 0
+
+    candidates: list[dict] = []
+    seen_local: set[str] = set()
+    # 联盟成员优先（带"上属联盟"上下文）
+    for f in (data.get("alliance_members") or []):
+        if not isinstance(f, dict):
+            continue
+        n = str(f.get("name", "")).strip()
+        if not n or n in seen_local:
+            continue
+        seen_local.add(n)
+        candidates.append({
+            "name": n,
+            "ideology": str(f.get("ideology", "")).strip() or "（设定中点名的远景势力）",
+            "summary": str(f.get("summary", "")).strip() or n,
+            "is_alliance": True,
+        })
+    # 显式点名（去掉与九派重复的）
+    for f in (data.get("explicitly_named") or []):
+        if not isinstance(f, dict):
+            continue
+        n = str(f.get("name", "")).strip()
+        if not n or n in seen_local:
+            continue
+        seen_local.add(n)
+        candidates.append({
+            "name": n,
+            "ideology": str(f.get("ideology", "")).strip() or "（设定中点名的势力）",
+            "summary": str(f.get("summary", "")).strip() or n,
+            "is_alliance": False,
+        })
+
+    added = 0
+    for f in candidates:
+        if f["name"] in existing_names:
+            continue
+        fid = f"fac_{uuid.uuid4().hex[:6]}"
+        repo.upsert_faction(Faction(
+            faction_id=fid,
+            name=f["name"],
+            ideology=f["ideology"],
+            goals="",
+            methods="",
+            territory=[],
+            structure=("远景势力联盟下属（具体地盘未落 canon）" if f["is_alliance"] else ""),
+            key_members=[],
+            history="",
+            relations=[],
+            secret="",
+            summary=f["summary"],
+            detail=("设定中点名/暗示的远景势力，仅作引用白名单使用；"
+                    "需要时再行 W3 深写。"),
+            source="w3_far",
+        ))
+        existing_names.add(f["name"])
+        added += 1
+    return added
 
 
 def build_static_graph(repo: Repository) -> dict:
@@ -582,6 +820,8 @@ def build_static_graph(repo: Repository) -> dict:
     - faction → faction (allied/hostile/infiltrates/neutral/tributary)：从 W3 Faction.relations JSON 迁过来。
     - location → location (located_in)：Location.parent（W2 层级关系）。
     - faction → person (has_member)：与 member_of 互为反向，方便检索。
+    - person → object (owns) + object → person (owned_by)：inventory.held（种子/章节累积）。
+    - location → object (has_item) + object → at_location：location.notable_items（W2 固有道具）。
 
     静态边 intensity 默认 0.7（强且稳定），不衰减。幂等：已有同三元组替换（UNIQUE ON CONFLICT REPLACE）。"""
     edges = 0
@@ -619,6 +859,27 @@ def build_static_graph(repo: Repository) -> dict:
             repo.upsert_edge(GraphEdge(src=loc.loc_id, rel="located_in", dst=loc.parent,
                                        meta={"source": "w2"}, intensity=0.7))
             edges += 1
+    # ④ 人→道具（inventory.held）+ 反向。意图：W6 RAG 按人物种子拉子图时能带出"主角口袋里啥"。
+    for inv in repo.list_inventory():
+        if (inv.status or "").lower() != "held":
+            continue
+        if not inv.holder_agent_id:
+            continue
+        repo.upsert_edge(GraphEdge(src=inv.holder_agent_id, rel="owns", dst=inv.object_id,
+                                   meta={"source": "inventory",
+                                         "acquired_chapter": inv.acquired_chapter or 0},
+                                   intensity=0.6))
+        repo.upsert_edge(GraphEdge(src=inv.object_id, rel="owned_by", dst=inv.holder_agent_id,
+                                   meta={"source": "inventory"}, intensity=0.6))
+        edges += 2
+    # ⑤ 地点→道具（location.notable_items）+ 反向。意图：按地点拉子图能带出"这地方有啥可拾"。
+    for loc in repo.list_locations():
+        for oid in (loc.notable_items or []):
+            repo.upsert_edge(GraphEdge(src=loc.loc_id, rel="has_item", dst=oid,
+                                       meta={"source": "w2_notable"}, intensity=0.6))
+            repo.upsert_edge(GraphEdge(src=oid, rel="at_location", dst=loc.loc_id,
+                                       meta={"source": "w2_notable"}, intensity=0.6))
+            edges += 2
     return {"edges": edges}
 
 
@@ -641,7 +902,7 @@ def lock_canonical_geography(repo: Repository, llm: LLMClient | None = None,
         return []
     system = (
         "你是小说世界观设定师。从给定的世界设定/地理文本中，抽取其中**真实点到或明确隐含的"
-        "具体地点**（街区/建筑/机构/地标，如『霞飞路』『七十六号』『百乐门』『闸北废墟』），"
+        "具体地点**（街区/建筑/机构/地标等文本中可定位的空间单元），"
         "供全书统一引用。**只抽设定里确实存在的地名，绝不臆造与设定冲突的新地点**"
         "（尤其不要编造奇幻地名，如设定里并不存在的塔/祠堂/秘境/结界）。每个给："
         "name(地点名)、geo_full(方位/地形/气候/建筑/声光气味，≥1 句)、"

@@ -1,4 +1,4 @@
-"""B1-a 大纲驱动重构脚手架：双层解码 + SceneWriter + FactExtractor（独立组件，未接 director）。"""
+"""B1-a 大纲驱动重构脚手架：双层解码 + SceneWriter + FactExtractor（独立组件，未接入当前主链）。"""
 from __future__ import annotations
 
 import json

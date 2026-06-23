@@ -1,21 +1,27 @@
-"""仓储层：对世界状态库的读写。
-
-Append-only 落实点：facts / events 只提供 append_*（INSERT），**不**提供 update/delete。
-这是设计文档 §0 原则 2（唯一真相源 + 不可变历史）的代码级保证。
-"""
+﻿"""Repository layer."""
 from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from .models import (
+    AcceptedChapterRecord,
     Arc,
+    AuthorExperienceFragment,
+    AuthorExperienceSource,
+    AuthorLifeModel,
+    AuthorWritingSheet,
     BatchAudit,
     Beat,
+    ChapterDraftRecord,
     ChapterPlan,
     CharacterCard,
     CharacterChapterLog,
+    ContinuationJobRecord,
+    ContinuationMeta,
     EmotionalState,
     Ending,
     Entity,
@@ -32,15 +38,50 @@ from .models import (
     ReaderKnowledge,
     RevealNode,
     Scene,
+    SceneAnchor,
+    SourceChapter,
+    SourceChunk,
+    SourceDocument,
+    StoryBibleRecord,
+    StyleCluster,
+    StyleClaim,
+    StyleNegativeSample,
+    StylePacket,
     StyleProfile,
+    StyleSegment,
     Thread,
     ToneProfile,
+    WritingSettings,
 )
+from .naming_profile import CharacterNameRecord, CultureNamingStyle, NamingProfile
 
 
 class Repository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+        self._tx_depth = 0
+
+    def _commit(self) -> None:
+        if self._tx_depth == 0:
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        outermost = self._tx_depth == 0
+        self._tx_depth += 1
+        if outermost:
+            self.conn.execute("BEGIN")
+        try:
+            yield
+        except Exception:
+            self._tx_depth -= 1
+            if outermost:
+                self.conn.rollback()
+            raise
+        else:
+            self._tx_depth -= 1
+            if outermost:
+                self.conn.commit()
 
     # ---------- world_bible ----------
     def set_world_bible(
@@ -77,7 +118,7 @@ class Repository:
                 json.dumps(exposition_release_rules or [], ensure_ascii=False),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_exposition_rules(self) -> list[dict[str, Any]]:
         row = self.conn.execute(
@@ -91,13 +132,38 @@ class Repository:
             return []
         return json.loads(row["physics_rules"])
 
-    # ---------- locations（§12.3 地点一等实体） ----------
+    def get_world_bible(self) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM world_bible WHERE id=1").fetchone()
+        if not row:
+            return {}
+        out = dict(row)
+        for key in ("geography", "culture", "physics_rules", "exposition_release_rules", "antagonist_profile"):
+            if key in out:
+                try:
+                    out[key] = json.loads(out[key] or ("[]" if key in {"physics_rules", "exposition_release_rules"} else "{}"))
+                except Exception:
+                    out[key] = [] if key in {"physics_rules", "exposition_release_rules"} else {}
+        return out
+
+    def set_world_bible_antagonist(self, antagonist_id: str, profile: dict[str, Any]) -> None:
+        self.conn.execute(
+            """INSERT INTO world_bible (id, antagonist_id, antagonist_profile)
+               VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 antagonist_id=excluded.antagonist_id,
+                 antagonist_profile=excluded.antagonist_profile""",
+            (antagonist_id, json.dumps(profile or {}, ensure_ascii=False)),
+        )
+        self._commit()
+
+    # ---------- locations锛埪?2.3 鍦扮偣涓€绛夊疄浣擄級 ----------
     def upsert_location(self, loc: Location) -> None:
         self.conn.execute(
             """INSERT INTO locations
                  (loc_id, part_id, name, geo_full, connects_to, controlling_faction, notable_items,
-                  level, parent, culture_local, summary, detail)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                  level, parent, culture_local, summary, detail, foreshadow_from, reveal_chapter,
+                  secret_reveal_chapter, foreshadow_hint, secret_truth)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(loc_id) DO UPDATE SET
                  part_id=excluded.part_id, name=excluded.name, geo_full=excluded.geo_full,
                  connects_to=excluded.connects_to,
@@ -105,18 +171,25 @@ class Repository:
                  notable_items=excluded.notable_items,
                  level=excluded.level, parent=excluded.parent,
                  culture_local=excluded.culture_local,
-                 summary=excluded.summary, detail=excluded.detail""",
+                 summary=excluded.summary, detail=excluded.detail,
+                 foreshadow_from=excluded.foreshadow_from,
+                 reveal_chapter=excluded.reveal_chapter,
+                 secret_reveal_chapter=excluded.secret_reveal_chapter,
+                 foreshadow_hint=excluded.foreshadow_hint,
+                 secret_truth=excluded.secret_truth""",
             (loc.loc_id, loc.part_id, loc.name, loc.geo_full,
              json.dumps(loc.connects_to, ensure_ascii=False), loc.controlling_faction,
              json.dumps(loc.notable_items, ensure_ascii=False),
-             loc.level, loc.parent, loc.culture_local, loc.summary, loc.detail),
+             loc.level, loc.parent, loc.culture_local, loc.summary, loc.detail,
+             loc.foreshadow_from, loc.reveal_chapter, loc.secret_reveal_chapter,
+             loc.foreshadow_hint, loc.secret_truth),
         )
-        self.conn.commit()
+        self._commit()
 
     def enrich_location(self, loc_id: str, summary: str, detail: str,
                         culture_local: str, level: str = "", parent: str = "",
                         geo_full: str = "") -> None:
-        """W2：丰富化地点（只更新 W2 字段，geo_full 非空时也一并更新）。"""
+        """Docstring omitted."""
         if geo_full:
             self.conn.execute(
                 """UPDATE locations SET summary=?, detail=?, culture_local=?, level=?, parent=?, geo_full=?
@@ -129,7 +202,7 @@ class Repository:
                    WHERE loc_id=?""",
                 (summary, detail, culture_local, level, parent, loc_id),
             )
-        self.conn.commit()
+        self._commit()
 
     def get_location(self, loc_id: str) -> Location | None:
         r = self.conn.execute("SELECT * FROM locations WHERE loc_id=?", (loc_id,)).fetchone()
@@ -142,11 +215,42 @@ class Repository:
             rows = self.conn.execute("SELECT * FROM locations WHERE part_id=?", (part_id,)).fetchall()
         return [_row_to_location(r) for r in rows]
 
-    # ---------- world_bible_sections（§12 全量存档，不摘要；W1 加两级 summary/detail） ----------
+    # ---------- 关键场景档案（scene_anchors）----------
+    def upsert_scene_anchor(self, anchor: SceneAnchor) -> None:
+        self.conn.execute(
+            """INSERT INTO scene_anchors
+                 (scene_id, name, kind, location_id, canonical_facts, aliases,
+                  established_chapter, created_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(scene_id) DO UPDATE SET
+                 name=excluded.name, kind=excluded.kind, location_id=excluded.location_id,
+                 canonical_facts=excluded.canonical_facts, aliases=excluded.aliases,
+                 established_chapter=excluded.established_chapter""",
+            (
+                anchor.scene_id, anchor.name, anchor.kind, anchor.location_id,
+                json.dumps(anchor.canonical_facts, ensure_ascii=False),
+                json.dumps(anchor.aliases, ensure_ascii=False),
+                int(anchor.established_chapter or 0), anchor.created_at,
+            ),
+        )
+        self._commit()
+
+    def get_scene_anchor(self, scene_id: str) -> SceneAnchor | None:
+        r = self.conn.execute("SELECT * FROM scene_anchors WHERE scene_id=?", (scene_id,)).fetchone()
+        return _row_to_scene_anchor(r) if r else None
+
+    def list_scene_anchors(self) -> list[SceneAnchor]:
+        rows = self.conn.execute("SELECT * FROM scene_anchors ORDER BY established_chapter, scene_id").fetchall()
+        return [_row_to_scene_anchor(r) for r in rows]
+
+    def delete_scene_anchor(self, scene_id: str) -> None:
+        self.conn.execute("DELETE FROM scene_anchors WHERE scene_id=?", (scene_id,))
+        self._commit()
+
+    # ---------- world_bible_sections锛埪?2 鍏ㄩ噺瀛樻。锛屼笉鎽樿锛沇1 鍔犱袱绾?summary/detail锛?----------
     def add_bible_section(self, section: str, title: str, body_full: str,
                           source: str = "user", created_at: int = 0, summary: str = "") -> None:
-        """逐字保存一节世界圣经原文（永不覆写，重复 section 允许多条）。空 body 不入库。
-        W1：可选 summary（仅 source='w1' 行填，作常驻注入的一两句速览）。"""
+        """逐字保存一节世界圣经原文。"""
         if not (body_full or "").strip():
             return
         self.conn.execute(
@@ -154,21 +258,21 @@ class Repository:
                VALUES (?,?,?,?,?,?)""",
             (section, title, body_full, summary, source, created_at),
         )
-        self.conn.commit()
+        self._commit()
 
     def upsert_w1_section(self, section: str, title: str, summary: str, detail: str) -> None:
-        """W1 权威两级条目：每节唯一一条 source='w1' 行（summary+detail 全文）。
-        先删本节旧 w1 行再插 → 修订/重跑替换不堆积；不动 user/llm_expanded 原始档案。"""
+        """写入每节唯一的 W1 权威条目。"""
         if not (detail or "").strip():
             return
         self.conn.execute(
-            "DELETE FROM world_bible_sections WHERE section=? AND source='w1'", (section,))
+            "DELETE FROM world_bible_sections WHERE section=? AND source='w1'", (section,)
+        )
         self.conn.execute(
             """INSERT INTO world_bible_sections (section, title, body_full, summary, source, created_at)
                VALUES (?,?,?,?,'w1',0)""",
             (section, title, detail, summary),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_bible_sections(self, section: str | None = None) -> list[dict[str, Any]]:
         if section is None:
@@ -186,20 +290,13 @@ class Repository:
         ]
 
     def bible_summaries_text(self, sections: list[str] | None = None) -> str:
-        """W1 常驻注入：拼接各节 source='w1' 行的 summary（全世界观速览，token 极省）。
-        无 w1 行时返回空串（旧项目/未跑 build_world_skill 时退化为不注入）。"""
-        rows = [r for r in self.list_bible_sections()
-                if r["source"] == "w1" and (r["summary"] or "").strip()]
+        rows = [r for r in self.list_bible_sections() if r["source"] == "w1" and (r["summary"] or "").strip()]
         if sections:
             want = set(sections)
             rows = [r for r in rows if r["section"] in want]
         return "\n".join(f"· {r['title'] or r['section']}：{r['summary'].strip()}" for r in rows)
 
     def bible_sections_text(self, sections: list[str] | None = None, max_chars: int = 4000) -> str:
-        """§12 检索而非概括：取相关分节的**全文**拼成提示词上下文（不摘要）。
-        sections 给定时只取这些节；否则取全部。总量裁到 max_chars 防爆 token。
-        W1：某节若有权威 w1 detail，则该节**只取 w1(+w1_deepened) 行**（厚且自洽），
-        丢弃同节的 user/llm_expanded 薄原文，避免厚薄混杂重复。无 w1 行的节维持原行为。"""
         rows = self.list_bible_sections()
         if sections:
             want = set(sections)
@@ -224,7 +321,7 @@ class Repository:
             "INSERT INTO entities (entity_id, type, name, attributes, created_tick) VALUES (?,?,?,?,?)",
             (e.entity_id, e.type, e.name, json.dumps(e.attributes, ensure_ascii=False), e.created_tick),
         )
-        self.conn.commit()
+        self._commit()
 
     def entity_exists(self, entity_id: str) -> bool:
         row = self.conn.execute(
@@ -239,7 +336,7 @@ class Repository:
         return None
 
     def update_entity_attributes(self, entity_id: str, attrs: dict[str, Any]) -> None:
-        """合并更新实体 attributes（用于固化道具设定 canon_detail 等）。"""
+        """合并更新实体 attributes。"""
         row = self.conn.execute(
             "SELECT attributes FROM entities WHERE entity_id=?", (entity_id,)
         ).fetchone()
@@ -251,7 +348,17 @@ class Repository:
             "UPDATE entities SET attributes=? WHERE entity_id=?",
             (json.dumps(cur, ensure_ascii=False), entity_id),
         )
-        self.conn.commit()
+        self._commit()
+
+    def update_entity_name(self, entity_id: str, name: str) -> None:
+        """Rename an entity in place so stable IDs and historical references survive."""
+        if not str(name or "").strip():
+            return
+        self.conn.execute(
+            "UPDATE entities SET name=? WHERE entity_id=?",
+            (str(name).strip(), entity_id),
+        )
+        self._commit()
 
     def list_entities(self) -> list[Entity]:
         rows = self.conn.execute("SELECT * FROM entities").fetchall()
@@ -266,7 +373,6 @@ class Repository:
             for r in rows
         ]
 
-    # ---------- facts（append-only） ----------
     def append_fact(self, f: Fact) -> None:
         self.conn.execute(
             """INSERT INTO facts
@@ -284,7 +390,7 @@ class Repository:
                 f.source_event_id,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def fact_exists(self, fact_id: str) -> bool:
         row = self.conn.execute("SELECT 1 FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
@@ -304,13 +410,13 @@ class Repository:
         rows = self.conn.execute("SELECT * FROM facts ORDER BY story_time").fetchall()
         return [_row_to_fact(r) for r in rows]
 
-    # ---------- events（append-only；drama_score 为后置标注，见 §1.2/§4.1） ----------
+    # ---------- events锛坅ppend-only锛沝rama_score 涓哄悗缃爣娉紝瑙?搂1.2/搂4.1锛?----------
     def append_event(self, ev: Event) -> None:
         self.conn.execute(
             """INSERT INTO events
                  (event_id, story_time, actors, action_type, payload,
-                  location_id, perceivers, beat_id)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                  location_id, perceivers, beat_id, story_clock)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 ev.event_id,
                 ev.story_time,
@@ -320,9 +426,20 @@ class Repository:
                 ev.location_id,
                 json.dumps(ev.perceivers, ensure_ascii=False),
                 ev.beat_id,
+                ev.story_clock,
             ),
         )
-        self.conn.commit()
+        self._commit()
+
+    def set_events_story_clock(self, event_ids: list[str], story_clock: int | None) -> None:
+        """故事时钟：给本章事件回填绝对钟点（不覆盖 story_time tick）。无钟点/无事件时空操作。"""
+        if story_clock is None or not event_ids:
+            return
+        self.conn.executemany(
+            "UPDATE events SET story_clock=? WHERE event_id=?",
+            [(int(story_clock), eid) for eid in event_ids if eid],
+        )
+        self._commit()
 
     def list_events(self) -> list[Event]:
         rows = self.conn.execute("SELECT * FROM events ORDER BY story_time").fetchall()
@@ -333,11 +450,11 @@ class Repository:
         return _row_to_event(r) if r else None
 
     def set_event_drama_score(self, event_id: str, score: float) -> None:
-        """后置标注 drama_score（§4.1"可后置计算"）。这是派生标注，非改写历史事实。"""
+        """后置标注 drama_score。"""
         self.conn.execute(
             "UPDATE events SET drama_score=? WHERE event_id=?", (score, event_id)
         )
-        self.conn.commit()
+        self._commit()
 
     def get_event_drama_score(self, event_id: str) -> float | None:
         r = self.conn.execute(
@@ -346,9 +463,9 @@ class Repository:
         return r["drama_score"] if r else None
 
     def set_event_beat(self, event_id: str, beat_id: str) -> None:
-        """给事件打上所属章号（派生标注，规划层用来按章归集事件，非改写历史内容）。"""
+        """给事件打上所属章号。"""
         self.conn.execute("UPDATE events SET beat_id=? WHERE event_id=?", (beat_id, event_id))
-        self.conn.commit()
+        self._commit()
 
     def count_events_for_beat(self, beat_id: str) -> int:
         r = self.conn.execute(
@@ -362,7 +479,7 @@ class Repository:
         ).fetchall()
         return [_row_to_event(r) for r in rows]
 
-    # ---------- agent_knowledge（账本） ----------
+    # ---------- agent_knowledge锛堣处鏈級 ----------
     def insert_knowledge(self, k: KnowledgeItem) -> None:
         self.conn.execute(
             """INSERT INTO agent_knowledge
@@ -378,10 +495,10 @@ class Repository:
                 k.source_event_id,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def upsert_knowledge(self, k: KnowledgeItem) -> None:
-        """覆盖式写入（供记忆巩固 UPDATE 用）。account_knowledge 是可变信念态，非不可变真相。"""
+        """覆盖式写入知识条目。"""
         self.conn.execute(
             """INSERT INTO agent_knowledge
                  (agent_id, fact_id, version_content, confidence, learned_tick, source_event_id)
@@ -393,7 +510,7 @@ class Repository:
                  source_event_id=excluded.source_event_id""",
             (k.agent_id, k.fact_id, k.version_content, k.confidence, k.learned_tick, k.source_event_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_knowledge_entry(self, agent_id: str, fact_id: str) -> KnowledgeItem | None:
         r = self.conn.execute(
@@ -414,10 +531,10 @@ class Repository:
         self.conn.execute(
             "DELETE FROM agent_knowledge WHERE agent_id=? AND fact_id=?", (agent_id, fact_id)
         )
-        self.conn.commit()
+        self._commit()
 
     def get_agent_ledger(self, agent_id: str) -> list[KnowledgeItem]:
-        """隔离的核心：只返回该 agent 自己的账本条目。"""
+        """只返回该 agent 自己的知识账本。"""
         rows = self.conn.execute(
             "SELECT * FROM agent_knowledge WHERE agent_id=? ORDER BY learned_tick",
             (agent_id,),
@@ -441,7 +558,6 @@ class Repository:
         ).fetchone()
         return row is not None
 
-    # ---------- persona ----------
     def insert_persona(self, p: Persona) -> None:
         self.conn.execute(
             """INSERT INTO persona
@@ -469,7 +585,7 @@ class Repository:
                 json.dumps(p.cost_ledger, ensure_ascii=False),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_persona(self, agent_id: str) -> Persona | None:
         r = self.conn.execute("SELECT * FROM persona WHERE agent_id=?", (agent_id,)).fetchone()
@@ -491,17 +607,15 @@ class Repository:
         )
 
     def list_personas(self) -> list[Persona]:
-        # 按插入顺序（= 种子草稿顺序）返回，保证 personas[0]=主角 等假设稳定
         rows = self.conn.execute("SELECT agent_id FROM persona ORDER BY rowid").fetchall()
         return [self.get_persona(r["agent_id"]) for r in rows]  # type: ignore[misc]
 
-    # persona 的 arc_state / cost_ledger 是「状态」而非历史事实，可变（区别于 facts 的不可变）
     def update_arc_state(self, agent_id: str, arc_state: dict[str, Any]) -> None:
         self.conn.execute(
             "UPDATE persona SET arc_state=? WHERE agent_id=?",
             (json.dumps(arc_state, ensure_ascii=False), agent_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def append_cost(self, agent_id: str, cost: str) -> None:
         p = self.get_persona(agent_id)
@@ -512,7 +626,7 @@ class Repository:
             "UPDATE persona SET cost_ledger=? WHERE agent_id=?",
             (json.dumps(p.cost_ledger, ensure_ascii=False), agent_id),
         )
-        self.conn.commit()
+        self._commit()
 
     # ---------- threads ----------
     def insert_thread(self, t: Thread) -> None:
@@ -538,7 +652,7 @@ class Repository:
                 t.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_threads(self) -> list[Thread]:
         rows = self.conn.execute("SELECT * FROM threads").fetchall()
@@ -560,9 +674,9 @@ class Repository:
             "UPDATE threads SET current_tension=?, last_advanced_tick=? WHERE thread_id=?",
             (tension, tick, thread_id),
         )
-        self.conn.commit()
+        self._commit()
 
-    # ---------- beats（节拍，§1.5） ----------
+    # ---------- beats锛堣妭鎷嶏紝搂1.5锛?----------
     def upsert_beat(self, b: "Beat") -> None:
         self.conn.execute(
             """INSERT INTO beats
@@ -585,7 +699,7 @@ class Repository:
                 b.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_beats(self) -> list["Beat"]:
         rows = self.conn.execute("SELECT * FROM beats ORDER BY sequence_order").fetchall()
@@ -603,7 +717,7 @@ class Repository:
             for r in rows
         ]
 
-    # ---------- 跨账本查询（叙事落差） ----------
+    # ---------- 璺ㄨ处鏈煡璇紙鍙欎簨钀藉樊锛?----------
     def holders_of_fact(self, fact_id: str) -> list[KnowledgeItem]:
         rows = self.conn.execute(
             "SELECT * FROM agent_knowledge WHERE fact_id=?", (fact_id,)
@@ -621,10 +735,8 @@ class Repository:
         ]
 
     def find_conflict_pairs(self) -> list[dict[str, Any]]:
-        """§1.3 conflict_pairs：两个角色对同一 fact 持不同 version → 人物冲突的种子。"""
-        rows = self.conn.execute(
-            "SELECT DISTINCT fact_id FROM agent_knowledge"
-        ).fetchall()
+        """找出对同一事实持不同版本的角色对。"""
+        rows = self.conn.execute("SELECT DISTINCT fact_id FROM agent_knowledge").fetchall()
         conflicts: list[dict[str, Any]] = []
         for r in rows:
             fid = r["fact_id"]
@@ -642,16 +754,15 @@ class Repository:
                 )
         return conflicts
 
-    # ---------- reader_knowledge（读者账本，§1.3） ----------
     def reveal_to_reader(self, rk: ReaderKnowledge) -> None:
         self.conn.execute(
             """INSERT INTO reader_knowledge
                  (fact_id, revealed_version, revealed_discourse_pos, via_pov)
                VALUES (?,?,?,?)
-               ON CONFLICT(fact_id) DO NOTHING""",  # 已揭示则不重复（首次揭示为准）
+               ON CONFLICT(fact_id) DO NOTHING""",
             (rk.fact_id, rk.revealed_version, rk.revealed_discourse_pos, rk.via_pov),
         )
-        self.conn.commit()
+        self._commit()
 
     def reader_knows(self, fact_id: str) -> bool:
         r = self.conn.execute(
@@ -674,16 +785,16 @@ class Repository:
         ]
 
     def mystery_set(self, candidate_fact_ids: list[str] | None = None) -> list[str]:
-        """读者还不知道的真相（§1.3）→ 悬念/谜题。默认在全部 facts 上算。"""
+        """读者还不知道的真相。"""
         candidates = candidate_fact_ids or [f.fact_id for f in self.list_facts()]
         return [fid for fid in candidates if not self.reader_knows(fid)]
 
     def irony_set(self, pov: str) -> list[str]:
-        """读者已知但 POV 角色不知道（§1.3）→ 戏剧反讽。"""
+        """读者已知但 POV 角色不知道的事实。"""
         known_by_pov = {k.fact_id for k in self.get_agent_ledger(pov)}
         return [rk.fact_id for rk in self.list_reader_knowledge() if rk.fact_id not in known_by_pov]
 
-    # ---------- scenes（叙述产物，§1.6） ----------
+    # ---------- scenes锛堝彊杩颁骇鐗╋紝搂1.6锛?----------
     def insert_scene(self, s: Scene) -> None:
         self.conn.execute(
             """INSERT INTO scenes
@@ -705,17 +816,15 @@ class Repository:
                 json.dumps(s.newly_revealed, ensure_ascii=False),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def update_scene_prose(self, scene_id: str, prose: str) -> None:
-        """审计重渲：只更新某场正文（保留 scene_id/discourse_order/揭示，不破坏阅读顺序与读者账本）。"""
+        """审计重渲：只更新某场正文。"""
         self.conn.execute("UPDATE scenes SET prose_text=? WHERE scene_id=?", (prose, scene_id))
-        self.conn.commit()
+        self._commit()
 
     def list_scenes(self) -> list[Scene]:
-        rows = self.conn.execute(
-            "SELECT * FROM scenes ORDER BY discourse_order"
-        ).fetchall()
+        rows = self.conn.execute("SELECT * FROM scenes ORDER BY discourse_order").fetchall()
         return [
             Scene(
                 scene_id=r["scene_id"],
@@ -729,7 +838,6 @@ class Repository:
             for r in rows
         ]
 
-    # ---------- foreshadows（伏笔台账，§1.5） ----------
     def upsert_foreshadow(self, fs: Foreshadow) -> None:
         self.conn.execute(
             """INSERT INTO foreshadows
@@ -753,7 +861,7 @@ class Repository:
                 fs.payoff_discourse_pos,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_foreshadows(self) -> list[Foreshadow]:
         rows = self.conn.execute(
@@ -773,7 +881,7 @@ class Repository:
         ).fetchall()
         return [_row_to_foreshadow(r) for r in rows]
 
-    # ---------- endings（候选结局，§1.1） ----------
+    # ---------- endings锛堝€欓€夌粨灞€锛屄?.1锛?----------
     def upsert_ending(self, e: Ending) -> None:
         self.conn.execute(
             """INSERT INTO endings
@@ -792,7 +900,7 @@ class Repository:
                 e.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_endings(self) -> list[Ending]:
         rows = self.conn.execute(
@@ -811,17 +919,19 @@ class Repository:
         ]
 
 
-    # ========== 规划层（大纲驱动；仅新建项目写入，旧项目留空） ==========
+    # ========== 瑙勫垝灞傦紙澶х翰椹卞姩锛涗粎鏂板缓椤圭洰鍐欏叆锛屾棫椤圭洰鐣欑┖锛?==========
 
     # ---------- parts ----------
     def upsert_part(self, p: Part) -> None:
         self.conn.execute(
             """INSERT INTO parts
-                 (part_id, sequence_order, title, goal, region, reveal_node_ids, status)
-               VALUES (?,?,?,?,?,?,?)
+                 (part_id, sequence_order, title, goal, region, key_twist,
+                  new_crisis_hook, reveal_node_ids, status)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(part_id) DO UPDATE SET
                  sequence_order=excluded.sequence_order, title=excluded.title,
                  goal=excluded.goal, region=excluded.region,
+                 key_twist=excluded.key_twist, new_crisis_hook=excluded.new_crisis_hook,
                  reveal_node_ids=excluded.reveal_node_ids, status=excluded.status""",
             (
                 p.part_id,
@@ -829,11 +939,13 @@ class Repository:
                 p.title,
                 p.goal,
                 p.region,
+                p.key_twist,
+                p.new_crisis_hook,
                 json.dumps(p.reveal_node_ids, ensure_ascii=False),
                 p.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_parts(self) -> list[Part]:
         rows = self.conn.execute("SELECT * FROM parts ORDER BY sequence_order").fetchall()
@@ -845,7 +957,7 @@ class Repository:
 
     def set_part_status(self, part_id: str, status: str) -> None:
         self.conn.execute("UPDATE parts SET status=? WHERE part_id=?", (status, part_id))
-        self.conn.commit()
+        self._commit()
 
     # ---------- arcs ----------
     def upsert_arc(self, a: Arc) -> None:
@@ -870,7 +982,7 @@ class Repository:
                 a.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_arcs(self, part_id: str | None = None) -> list[Arc]:
         if part_id is None:
@@ -887,20 +999,22 @@ class Repository:
 
     def set_arc_status(self, arc_id: str, status: str) -> None:
         self.conn.execute("UPDATE arcs SET status=? WHERE arc_id=?", (status, arc_id))
-        self.conn.commit()
+        self._commit()
 
     # ---------- chapter_plans ----------
     def upsert_chapter_plan(self, c: ChapterPlan) -> None:
         self.conn.execute(
             """INSERT INTO chapter_plans
                  (chapter_id, arc_id, sequence_order, title, cast, location_ids,
-                  available_items, items_present, items_introduced, items_consumed,
-                  beat_goals, reveal_gate, knowledge_delta,
-                  summary, scene_ids, target_scenes, role, target_tension,
-                  dramatic_question, resolution_predicate, min_scenes, target_words,
-                  ending_hook, hook_type, pov_agent, exit_state, audited, conflict_type,
-                  beat_povs, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   available_items, items_present, items_introduced, items_consumed,
+                   beat_goals, reveal_gate, must_happen, required_exit_state, scene_flow,
+                   allowed_entity_ids, allowed_fact_ids, forbidden, item_sources,
+                   package_version, thread_decisions_json, knowledge_delta,
+                   summary, scene_ids, target_scenes, role, target_tension,
+                   dramatic_question, resolution_predicate, min_scenes, target_words,
+                   ending_hook, hook_type, pov_agent, exit_state, audited, conflict_type,
+                   beat_povs, time_hint, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(chapter_id) DO UPDATE SET
                  arc_id=excluded.arc_id, sequence_order=excluded.sequence_order,
                  title=excluded.title, cast=excluded.cast,
@@ -908,6 +1022,15 @@ class Repository:
                  items_present=excluded.items_present, items_introduced=excluded.items_introduced,
                  items_consumed=excluded.items_consumed,
                  beat_goals=excluded.beat_goals, reveal_gate=excluded.reveal_gate,
+                 must_happen=excluded.must_happen,
+                 required_exit_state=excluded.required_exit_state,
+                 scene_flow=excluded.scene_flow,
+                 allowed_entity_ids=excluded.allowed_entity_ids,
+                 allowed_fact_ids=excluded.allowed_fact_ids,
+                 forbidden=excluded.forbidden,
+                 item_sources=excluded.item_sources,
+                 package_version=excluded.package_version,
+                 thread_decisions_json=excluded.thread_decisions_json,
                  knowledge_delta=excluded.knowledge_delta, summary=excluded.summary,
                  scene_ids=excluded.scene_ids, target_scenes=excluded.target_scenes,
                  role=excluded.role, target_tension=excluded.target_tension,
@@ -917,7 +1040,8 @@ class Repository:
                  ending_hook=excluded.ending_hook, hook_type=excluded.hook_type,
                  pov_agent=excluded.pov_agent, exit_state=excluded.exit_state,
                  audited=excluded.audited, conflict_type=excluded.conflict_type,
-                 beat_povs=excluded.beat_povs, status=excluded.status""",
+                 beat_povs=excluded.beat_povs, time_hint=excluded.time_hint,
+                 status=excluded.status""",
             (
                 c.chapter_id,
                 c.arc_id,
@@ -931,6 +1055,15 @@ class Repository:
                 json.dumps(c.items_consumed, ensure_ascii=False),
                 json.dumps(c.beat_goals, ensure_ascii=False),
                 json.dumps(c.reveal_gate, ensure_ascii=False),
+                json.dumps(c.must_happen, ensure_ascii=False),
+                c.required_exit_state,
+                json.dumps(c.scene_flow, ensure_ascii=False),
+                json.dumps(c.allowed_entity_ids, ensure_ascii=False),
+                json.dumps(c.allowed_fact_ids, ensure_ascii=False),
+                json.dumps(c.forbidden, ensure_ascii=False),
+                json.dumps(c.item_sources, ensure_ascii=False),
+                int(c.package_version or 1),
+                json.dumps(c.thread_decisions_json, ensure_ascii=False),
                 json.dumps(c.knowledge_delta, ensure_ascii=False),
                 c.summary,
                 json.dumps(c.scene_ids, ensure_ascii=False),
@@ -948,10 +1081,11 @@ class Repository:
                 int(c.audited or 0),
                 c.conflict_type,
                 json.dumps(c.beat_povs, ensure_ascii=False),
+                c.time_hint,
                 c.status,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_chapter_plans(self, arc_id: str | None = None) -> list[ChapterPlan]:
         if arc_id is None:
@@ -971,9 +1105,7 @@ class Repository:
         return _row_to_chapter_plan(r) if r else None
 
     def delete_chapter_cascade(self, chapter_id: str) -> dict:
-        """删除一章及其已写正文（场/事件）。用于"不满意就删，删后大纲可改/重写"。
-        删 scenes（source_events 属本章的）→ 删 events（beat_id=本章）→ 删 chapter_plan。
-        返回删除计数。注意：删中间已写章会在正文留下空档（用户自担），调用方可选择级联后续章。"""
+        """删除一章及其已写正文（场/事件）→ 删 scenes → 删 events → 删 chapter_plan，返回删除计数。"""
         ev_ids = {e.event_id for e in self.events_for_beat(chapter_id)}
         n_sc = 0
         if ev_ids:
@@ -983,7 +1115,7 @@ class Repository:
                     n_sc += 1
         self.conn.execute("DELETE FROM events WHERE beat_id=?", (chapter_id,))
         self.conn.execute("DELETE FROM chapter_plans WHERE chapter_id=?", (chapter_id,))
-        self.conn.commit()
+        self._commit()
         return {"scenes": n_sc, "events": len(ev_ids)}
 
     def chapter_is_written(self, chapter_id: str) -> bool:
@@ -999,7 +1131,7 @@ class Repository:
         return any(any(eid in ev_ids for eid in s.source_events) for s in self.list_scenes())
 
     def active_chapter_plan(self) -> ChapterPlan | None:
-        """当前 active 章；无 active 时取最早一个 planned（待开工的下一章）。"""
+        """当前 active 章；无 active 时回落最早 planned。"""
         r = self.conn.execute(
             "SELECT * FROM chapter_plans WHERE status='active' ORDER BY sequence_order LIMIT 1"
         ).fetchone()
@@ -1010,7 +1142,6 @@ class Repository:
         ).fetchone()
         return _row_to_chapter_plan(r) if r else None
 
-    # ---------- inventory（物品归属，可转移/丢失） ----------
     def set_inventory(self, item: InventoryItem) -> None:
         self.conn.execute(
             """INSERT INTO inventory
@@ -1021,7 +1152,7 @@ class Repository:
                  acquired_chapter=excluded.acquired_chapter, note=excluded.note""",
             (item.object_id, item.holder_agent_id, item.status, item.acquired_chapter, item.note),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_inventory_item(self, object_id: str) -> InventoryItem | None:
         r = self.conn.execute(
@@ -1051,7 +1182,7 @@ class Repository:
             self.set_inventory(InventoryItem(object_id, to_agent, "held", chapter, note))
 
     def item_exists(self, object_id: str) -> bool:
-        """物品是否仍然存在（未被消耗/销毁/献祭）。"""
+        """物品是否仍然存在（未被消耗/销毁/献祭）。未入库存的物品按存在处理。"""
         r = self.conn.execute(
             "SELECT status FROM inventory WHERE object_id=?", (object_id,)
         ).fetchone()
@@ -1068,7 +1199,7 @@ class Repository:
 
     # ---------- character chapter logs ----------
     def insert_character_log(self, log: CharacterChapterLog) -> None:
-        """Upsert a chapter-level character log, appending fields for repeated scene beats."""
+        """Docstring omitted."""
         row = self.conn.execute(
             "SELECT * FROM character_chapter_logs WHERE agent_id=? AND chapter_seq=?",
             (log.agent_id, log.chapter_seq),
@@ -1106,7 +1237,7 @@ class Repository:
                     json.dumps(log.items_changed or [], ensure_ascii=False),
                 ),
             )
-        self.conn.commit()
+        self._commit()
 
     def get_character_logs(
         self, agent_id: str, last_n: int = 5, before_chapter: int | None = None
@@ -1144,7 +1275,7 @@ class Repository:
                 int(audit.created_tick or 0),
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def latest_batch_audit(self, before_chapter: int | None = None) -> BatchAudit | None:
         sql = "SELECT * FROM batch_audits"
@@ -1156,7 +1287,7 @@ class Repository:
         row = self.conn.execute(sql, args).fetchone()
         return _row_to_batch_audit(row) if row else None
 
-    # ---------- reveal_chain（探索驱动揭示链） ----------
+    # ---------- reveal_chain锛堟帰绱㈤┍鍔ㄦ彮绀洪摼锛?----------
     def upsert_reveal_node(self, n: RevealNode) -> None:
         self.conn.execute(
             """INSERT INTO reveal_chain
@@ -1181,7 +1312,7 @@ class Repository:
                 n.discovered_chapter,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_reveal_nodes(self) -> list[RevealNode]:
         rows = self.conn.execute(
@@ -1200,35 +1331,36 @@ class Repository:
             "UPDATE reveal_chain SET discovered=1, discovered_chapter=? WHERE node_id=?",
             (chapter, node_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def unlockable_nodes(self) -> list[RevealNode]:
-        """前置全部已 discovered、自身尚未 discovered 的节点 → 当前可被主角"撞到"的下一步。"""
+        """前置全部完成、自身尚未发现的揭示节点。"""
         nodes = self.list_reveal_nodes()
         done = {n.node_id for n in nodes if n.discovered}
-        return [
-            n for n in nodes
-            if not n.discovered and all(p in done for p in n.prereq_node_ids)
-        ]
+        return [n for n in nodes if not n.discovered and all(p in done for p in n.prereq_node_ids)]
 
-    # ---------- tone_profile（§16 文风契约 / 闸门⓪） ----------
     def get_tone_profile(self) -> ToneProfile:
         r = self.conn.execute("SELECT * FROM tone_profile WHERE id=1").fetchone()
         if not r:
             return ToneProfile()
         return ToneProfile(
-            genre=r["genre"], primary_effect=r["primary_effect"], register=r["register"],
+            genre=r["genre"],
+            primary_effect=r["primary_effect"],
+            register=r["register"],
             sentence_rhythm=r["sentence_rhythm"],
-            diction_do=json.loads(r["diction_do"]), diction_dont=json.loads(r["diction_dont"]),
-            device_kit=json.loads(r["device_kit"]), pacing=r["pacing"],
-            tension_curve_bias=r["tension_curve_bias"], reveal_cadence=r["reveal_cadence"],
-            complexity=r["complexity"], tone_reference=r["tone_reference"],
+            diction_do=json.loads(r["diction_do"]),
+            diction_dont=json.loads(r["diction_dont"]),
+            device_kit=json.loads(r["device_kit"]),
+            pacing=r["pacing"],
+            tension_curve_bias=r["tension_curve_bias"],
+            reveal_cadence=r["reveal_cadence"],
+            complexity=r["complexity"],
+            tone_reference=r["tone_reference"],
             confirmed=bool(r["confirmed"]),
             era_logic=json.loads(r["era_logic"]) if ("era_logic" in r.keys() and r["era_logic"]) else {},
         )
 
     def set_tone_profile(self, p: ToneProfile) -> None:
-        """写入/覆盖文风契约。确认后（confirmed=1）拒绝再写，保证全程只读、不漂移。"""
         cur = self.conn.execute("SELECT confirmed FROM tone_profile WHERE id=1").fetchone()
         if cur and cur["confirmed"]:
             return
@@ -1247,31 +1379,45 @@ class Repository:
                  reveal_cadence=excluded.reveal_cadence, complexity=excluded.complexity,
                  tone_reference=excluded.tone_reference, confirmed=excluded.confirmed,
                  era_logic=excluded.era_logic""",
-            (p.genre, p.primary_effect, p.register, p.sentence_rhythm,
-             json.dumps(p.diction_do, ensure_ascii=False),
-             json.dumps(p.diction_dont, ensure_ascii=False),
-             json.dumps(p.device_kit, ensure_ascii=False), p.pacing,
-             p.tension_curve_bias, p.reveal_cadence, p.complexity,
-             p.tone_reference, 1 if p.confirmed else 0,
-             json.dumps(p.era_logic or {}, ensure_ascii=False)),
+            (
+                p.genre,
+                p.primary_effect,
+                p.register,
+                p.sentence_rhythm,
+                json.dumps(p.diction_do, ensure_ascii=False),
+                json.dumps(p.diction_dont, ensure_ascii=False),
+                json.dumps(p.device_kit, ensure_ascii=False),
+                p.pacing,
+                p.tension_curve_bias,
+                p.reveal_cadence,
+                p.complexity,
+                p.tone_reference,
+                1 if p.confirmed else 0,
+                json.dumps(p.era_logic or {}, ensure_ascii=False),
+            ),
         )
-        self.conn.commit()
+        self._commit()
 
     def confirm_tone_profile(self) -> None:
-        """用户确认基调 → 之后只读。"""
         self.conn.execute("UPDATE tone_profile SET confirmed=1 WHERE id=1")
-        self.conn.commit()
+        self._commit()
 
-    # ---------- B0 文风模拟（style_skill，单行表） ----------
     def get_style_skill(self) -> StyleProfile:
         r = self.conn.execute("SELECT * FROM style_skill WHERE id=1").fetchone()
         if not r:
             return StyleProfile()
         return StyleProfile(
-            name=r["name"], source=r["source"], register=r["register"], rhythm=r["rhythm"],
-            devices=json.loads(r["devices"]), diction_do=json.loads(r["diction_do"]),
-            diction_dont=json.loads(r["diction_dont"]), motifs=json.loads(r["motifs"]),
-            samples=json.loads(r["samples"]), metrics=json.loads(r["metrics"]),
+            name=r["name"],
+            source=r["source"],
+            register=r["register"],
+            rhythm=r["rhythm"],
+            devices=json.loads(r["devices"]),
+            diction_do=json.loads(r["diction_do"]),
+            diction_dont=json.loads(r["diction_dont"]),
+            motifs=json.loads(r["motifs"]),
+            samples=json.loads(r["samples"]),
+            metrics=json.loads(r["metrics"]),
+            persona_md=r["persona_md"] if "persona_md" in r.keys() else "",
             enabled=bool(r["enabled"]),
         )
 
@@ -1279,36 +1425,111 @@ class Repository:
         self.conn.execute(
             """INSERT INTO style_skill
                  (id, name, source, register, rhythm, devices, diction_do, diction_dont,
-                  motifs, samples, metrics, enabled)
-               VALUES (1,?,?,?,?,?,?,?,?,?,?,?)
+                  motifs, samples, metrics, persona_md, enabled)
+               VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, source=excluded.source, register=excluded.register,
                  rhythm=excluded.rhythm, devices=excluded.devices, diction_do=excluded.diction_do,
                  diction_dont=excluded.diction_dont, motifs=excluded.motifs,
-                 samples=excluded.samples, metrics=excluded.metrics, enabled=excluded.enabled""",
-            (p.name, p.source, p.register, p.rhythm,
-             json.dumps(p.devices, ensure_ascii=False),
-             json.dumps(p.diction_do, ensure_ascii=False),
-             json.dumps(p.diction_dont, ensure_ascii=False),
-             json.dumps(p.motifs, ensure_ascii=False),
-             json.dumps(p.samples, ensure_ascii=False),
-             json.dumps(p.metrics, ensure_ascii=False),
-             1 if p.enabled else 0),
+                 samples=excluded.samples, metrics=excluded.metrics,
+                 persona_md=excluded.persona_md, enabled=excluded.enabled""",
+            (
+                p.name,
+                p.source,
+                p.register,
+                p.rhythm,
+                json.dumps(p.devices, ensure_ascii=False),
+                json.dumps(p.diction_do, ensure_ascii=False),
+                json.dumps(p.diction_dont, ensure_ascii=False),
+                json.dumps(p.motifs, ensure_ascii=False),
+                json.dumps(p.samples, ensure_ascii=False),
+                json.dumps(p.metrics, ensure_ascii=False),
+                p.persona_md or "",
+                1 if p.enabled else 0,
+            ),
         )
-        self.conn.commit()
+        self._commit()
 
     def set_style_skill_enabled(self, enabled: bool) -> None:
         self.conn.execute("UPDATE style_skill SET enabled=? WHERE id=1", (1 if enabled else 0,))
-        self.conn.commit()
+        self._commit()
 
     def delete_style_skill(self) -> None:
-        """删除文风模拟 → 回落到 tone_profile 基线。"""
         self.conn.execute("DELETE FROM style_skill WHERE id=1")
-        self.conn.commit()
+        self._commit()
+
+    # ---------- S1 Author Writing Sheet ----------
+    def save_author_sheet(self, sheet: AuthorWritingSheet) -> int:
+        import time
+        cur = self.conn.execute(
+            """INSERT INTO author_sheets
+                 (name, source_genre, plot_json, creativity_json, development_json,
+                  language_json, persona_md, n_segments, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (sheet.name, sheet.source_genre,
+             json.dumps([{"claim": c.claim, "evidence": c.evidence, "source_chapter": c.source_chapter}
+                         for c in sheet.plot], ensure_ascii=False),
+             json.dumps([{"claim": c.claim, "evidence": c.evidence, "source_chapter": c.source_chapter}
+                         for c in sheet.creativity], ensure_ascii=False),
+             json.dumps([{"claim": c.claim, "evidence": c.evidence, "source_chapter": c.source_chapter}
+                         for c in sheet.development], ensure_ascii=False),
+             json.dumps([{"claim": c.claim, "evidence": c.evidence, "source_chapter": c.source_chapter}
+                         for c in sheet.language], ensure_ascii=False),
+             sheet.persona_md, sheet.n_segments, int(time.time())),
+        )
+        sheet_id = cur.lastrowid
+        for dim, claims in [("plot", sheet.plot), ("creativity", sheet.creativity),
+                            ("development", sheet.development), ("language", sheet.language)]:
+            for idx, c in enumerate(claims):
+                if c.evidence:
+                    self.conn.execute(
+                        "INSERT INTO style_evidence (sheet_id, dimension, claim_idx, excerpt, source_chapter) VALUES (?,?,?,?,?)",
+                        (sheet_id, dim, idx, c.evidence, c.source_chapter))
+        self._commit()
+        return sheet_id  # type: ignore[return-value]
+
+    def get_author_sheet(self, sheet_id: int) -> AuthorWritingSheet | None:
+        r = self.conn.execute("SELECT * FROM author_sheets WHERE id=?", (sheet_id,)).fetchone()
+        if not r:
+            return None
+
+        def _parse(data) -> list[StyleClaim]:
+            items = json.loads(data) if isinstance(data, str) else data
+            return [StyleClaim(claim=x.get("claim", ""), evidence=x.get("evidence", ""),
+                               source_chapter=x.get("source_chapter", "")) for x in items]
+        return AuthorWritingSheet(
+            name=r["name"], source_genre=r["source_genre"],
+            plot=_parse(r["plot_json"]), creativity=_parse(r["creativity_json"]),
+            development=_parse(r["development_json"]), language=_parse(r["language_json"]),
+            persona_md=r["persona_md"], n_segments=r["n_segments"])
+
+    def list_author_sheets(self) -> list[dict]:
+        rows = self.conn.execute("SELECT id, name, source_genre, n_segments, created_at FROM author_sheets ORDER BY created_at DESC").fetchall()
+        return [{"id": r["id"], "name": r["name"], "sourceGenre": r["source_genre"],
+                 "nSegments": r["n_segments"], "createdAt": r["created_at"]} for r in rows]
+
+    def delete_author_sheet(self, sheet_id: int) -> None:
+        self.conn.execute("DELETE FROM style_evidence WHERE sheet_id=?", (sheet_id,))
+        self.conn.execute("DELETE FROM author_sheets WHERE id=?", (sheet_id,))
+        self._commit()
+
+    def get_active_author_sheet(self) -> AuthorWritingSheet | None:
+        settings = self.get_writing_settings()
+        if settings.style_profile_id:
+            sheet = self.get_author_sheet(int(settings.style_profile_id))
+            if sheet:
+                return sheet
+        record = self.get_story_bible_record()
+        if record and record.style_profile_id:
+            sheet = self.get_author_sheet(int(record.style_profile_id))
+            if sheet:
+                return sheet
+        row = self.conn.execute(
+            "SELECT id FROM author_sheets ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return self.get_author_sheet(int(row["id"])) if row else None
 
     def style_skill_prompt(self) -> str:
-        """B0 安全注入块：仿某文风写作，但只学腔调、严禁照搬样例的具体内容。
-        无启用的 style_skill 则空（回落 tone_profile 基线）。"""
         p = self.get_style_skill()
         if not p.is_set():
             return ""
@@ -1319,8 +1540,10 @@ class Repository:
         if p.devices:
             lines.append("  多用手法：" + "、".join(p.devices[:8]) + "。")
         if p.diction_do or p.diction_dont:
-            lines.append(f"  偏好词：{('、'.join(p.diction_do[:8]) or '—')}；"
-                         f"禁忌词：{('、'.join(p.diction_dont[:8]) or '—')}。")
+            lines.append(
+                f"  偏好词：{('、'.join(p.diction_do[:8]) or '—')}；"
+                f"禁忌词：{('、'.join(p.diction_dont[:8]) or '—')}。"
+            )
         if p.motifs:
             lines.append("  可呼应的母题意象：" + "、".join(p.motifs[:8]) + "。")
         if p.samples:
@@ -1328,19 +1551,361 @@ class Repository:
             for i, s in enumerate(p.samples[:2], 1):
                 lines.append(f"  {'①②'[i - 1]} {str(s)[:150]}")
         lines.append(
-            "【硬约束】只学其**腔调、句式、节奏、用词、标点、意象密度**；"
-            "样例里的任何具体内容（人名/地名/物件/情节）都**不得**出现在你的正文里——"
-            "那是别的故事，你写的是本作的这一拍。")
+            "【硬约束】只学其腔调、句式、节奏、用词、标点、意象密度；"
+            "样例里的任何具体内容都不得出现在你的正文里。"
+        )
         return "\n".join(lines)
 
+    def insert_style_segment(self, seg: StyleSegment) -> None:
+        self.conn.execute(
+            """INSERT INTO style_segments
+                 (id, project_id, source_chapter_id, start_offset, end_offset, text,
+                  voice_type, character_id, pov_character_id, discourse_type, scene_type,
+                  emotion_json, register_type, feature_json, embedding_key,
+                  quality_score, annotation_confidence, enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 source_chapter_id=excluded.source_chapter_id,
+                 start_offset=excluded.start_offset,
+                 end_offset=excluded.end_offset,
+                 text=excluded.text,
+                 voice_type=excluded.voice_type,
+                 character_id=excluded.character_id,
+                 pov_character_id=excluded.pov_character_id,
+                 discourse_type=excluded.discourse_type,
+                 scene_type=excluded.scene_type,
+                 emotion_json=excluded.emotion_json,
+                 register_type=excluded.register_type,
+                 feature_json=excluded.feature_json,
+                 embedding_key=excluded.embedding_key,
+                 quality_score=excluded.quality_score,
+                 annotation_confidence=excluded.annotation_confidence,
+                 enabled=excluded.enabled""",
+            (
+                seg.id,
+                seg.project_id,
+                seg.source_chapter_id,
+                seg.start_offset,
+                seg.end_offset,
+                seg.text,
+                seg.voice_type,
+                seg.character_id,
+                seg.pov_character_id,
+                seg.discourse_type,
+                seg.scene_type,
+                json.dumps(seg.emotion_json, ensure_ascii=False),
+                seg.register_type,
+                json.dumps(seg.feature_json, ensure_ascii=False),
+                seg.embedding_key,
+                seg.quality_score,
+                seg.annotation_confidence,
+                1 if seg.enabled else 0,
+            ),
+        )
+        self._commit()
+
+    def clear_style_corpus(self) -> None:
+        self.conn.execute("DELETE FROM style_negative_samples")
+        self.conn.execute("DELETE FROM style_clusters")
+        self.conn.execute("DELETE FROM style_segments")
+        self._commit()
+
+    def list_style_segments(self, *, discourse_type: str | None = None,
+                            enabled_only: bool = True) -> list[StyleSegment]:
+        clauses = []
+        params: list[Any] = []
+        if discourse_type:
+            clauses.append("discourse_type=?")
+            params.append(discourse_type)
+        if enabled_only:
+            clauses.append("enabled=1")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM style_segments{where} ORDER BY source_chapter_id, start_offset, id",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_style_segment(r) for r in rows]
+
+    def get_style_segment(self, segment_id: str) -> StyleSegment | None:
+        row = self.conn.execute("SELECT * FROM style_segments WHERE id=?", (segment_id,)).fetchone()
+        return _row_to_style_segment(row) if row else None
+
+    def insert_style_cluster(self, cluster: StyleCluster) -> None:
+        self.conn.execute(
+            """INSERT INTO style_clusters
+                 (id, project_id, cluster_type, label, centroid_key,
+                  feature_summary_json, representative_segment_ids_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 cluster_type=excluded.cluster_type,
+                 label=excluded.label,
+                 centroid_key=excluded.centroid_key,
+                 feature_summary_json=excluded.feature_summary_json,
+                 representative_segment_ids_json=excluded.representative_segment_ids_json""",
+            (
+                cluster.id,
+                cluster.project_id,
+                cluster.cluster_type,
+                cluster.label,
+                cluster.centroid_key,
+                json.dumps(cluster.feature_summary_json, ensure_ascii=False),
+                json.dumps(cluster.representative_segment_ids_json, ensure_ascii=False),
+            ),
+        )
+        self._commit()
+
+    def list_style_clusters(self, cluster_type: str | None = None) -> list[StyleCluster]:
+        if cluster_type is None:
+            rows = self.conn.execute("SELECT * FROM style_clusters ORDER BY cluster_type, label, id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM style_clusters WHERE cluster_type=? ORDER BY label, id",
+                (cluster_type,),
+            ).fetchall()
+        return [_row_to_style_cluster(r) for r in rows]
+
+    def insert_style_negative_sample(self, sample: StyleNegativeSample) -> None:
+        self.conn.execute(
+            """INSERT INTO style_negative_samples
+                 (id, project_id, text, failure_types_json, related_source_segment_ids_json,
+                  score_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 text=excluded.text,
+                 failure_types_json=excluded.failure_types_json,
+                 related_source_segment_ids_json=excluded.related_source_segment_ids_json,
+                 score_json=excluded.score_json,
+                 created_at=excluded.created_at""",
+            (
+                sample.id,
+                sample.project_id,
+                sample.text,
+                json.dumps(sample.failure_types_json, ensure_ascii=False),
+                json.dumps(sample.related_source_segment_ids_json, ensure_ascii=False),
+                json.dumps(sample.score_json, ensure_ascii=False),
+                sample.created_at,
+            ),
+        )
+        self._commit()
+
+    def list_style_negative_samples(self, limit: int = 20) -> list[StyleNegativeSample]:
+        rows = self.conn.execute(
+            "SELECT * FROM style_negative_samples ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_style_negative_sample(r) for r in rows]
+
+    def clear_author_experience(self) -> None:
+        self.conn.execute("DELETE FROM author_life_models")
+        self.conn.execute("DELETE FROM author_experience_fragments")
+        self.conn.execute("DELETE FROM author_experience_sources")
+        self._commit()
+
+    def insert_author_experience_source(self, source: AuthorExperienceSource) -> None:
+        self.conn.execute(
+            """INSERT INTO author_experience_sources
+                 (source_id, project_id, label, source_type, path, content_hash, enabled, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(source_id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 label=excluded.label,
+                 source_type=excluded.source_type,
+                 path=excluded.path,
+                 content_hash=excluded.content_hash,
+                 enabled=excluded.enabled,
+                 created_at=excluded.created_at""",
+            (
+                source.source_id,
+                source.project_id,
+                source.label,
+                source.source_type,
+                source.path,
+                source.content_hash,
+                1 if source.enabled else 0,
+                source.created_at,
+            ),
+        )
+        self._commit()
+
+    def list_author_experience_sources(self, *, enabled_only: bool = True) -> list[AuthorExperienceSource]:
+        where = " WHERE enabled=1" if enabled_only else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM author_experience_sources{where} ORDER BY created_at DESC, source_id DESC"
+        ).fetchall()
+        return [_row_to_author_experience_source(r) for r in rows]
+
+    def insert_author_experience_fragment(self, fragment: AuthorExperienceFragment) -> None:
+        self.conn.execute(
+            """INSERT INTO author_experience_fragments
+                 (fragment_id, project_id, source_id, fragment_index, title_hint, text,
+                  tags_json, emotion_json, self_schema_json, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(fragment_id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 source_id=excluded.source_id,
+                 fragment_index=excluded.fragment_index,
+                 title_hint=excluded.title_hint,
+                 text=excluded.text,
+                 tags_json=excluded.tags_json,
+                 emotion_json=excluded.emotion_json,
+                 self_schema_json=excluded.self_schema_json,
+                 confidence=excluded.confidence""",
+            (
+                fragment.fragment_id,
+                fragment.project_id,
+                fragment.source_id,
+                fragment.fragment_index,
+                fragment.title_hint,
+                fragment.text,
+                json.dumps(fragment.tags_json, ensure_ascii=False),
+                json.dumps(fragment.emotion_json, ensure_ascii=False),
+                json.dumps(fragment.self_schema_json, ensure_ascii=False),
+                fragment.confidence,
+            ),
+        )
+        self._commit()
+
+    def list_author_experience_fragments(self, source_id: str | None = None) -> list[AuthorExperienceFragment]:
+        if source_id:
+            rows = self.conn.execute(
+                """SELECT * FROM author_experience_fragments
+                   WHERE source_id=? ORDER BY fragment_index, fragment_id""",
+                (source_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM author_experience_fragments ORDER BY source_id, fragment_index, fragment_id"
+            ).fetchall()
+        return [_row_to_author_experience_fragment(r) for r in rows]
+
+    def upsert_author_life_model(self, model: AuthorLifeModel) -> None:
+        self.conn.execute(
+            """INSERT INTO author_life_models
+                 (model_id, project_id, source_ids_json, source_label, summary, core_wound_json,
+                  defense_patterns_json, desire_vectors_json, relationship_model_json,
+                  narrative_engines_json, prose_rules_json, worldview_json, evidence_json,
+                  confidence_json, persona_prompt, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(model_id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 source_ids_json=excluded.source_ids_json,
+                 source_label=excluded.source_label,
+                 summary=excluded.summary,
+                 core_wound_json=excluded.core_wound_json,
+                 defense_patterns_json=excluded.defense_patterns_json,
+                 desire_vectors_json=excluded.desire_vectors_json,
+                 relationship_model_json=excluded.relationship_model_json,
+                 narrative_engines_json=excluded.narrative_engines_json,
+                 prose_rules_json=excluded.prose_rules_json,
+                 worldview_json=excluded.worldview_json,
+                 evidence_json=excluded.evidence_json,
+                 confidence_json=excluded.confidence_json,
+                 persona_prompt=excluded.persona_prompt,
+                 created_at=excluded.created_at""",
+            (
+                model.model_id,
+                model.project_id,
+                json.dumps(model.source_ids_json, ensure_ascii=False),
+                model.source_label,
+                model.summary,
+                json.dumps(model.core_wound_json, ensure_ascii=False),
+                json.dumps(model.defense_patterns_json, ensure_ascii=False),
+                json.dumps(model.desire_vectors_json, ensure_ascii=False),
+                json.dumps(model.relationship_model_json, ensure_ascii=False),
+                json.dumps(model.narrative_engines_json, ensure_ascii=False),
+                json.dumps(model.prose_rules_json, ensure_ascii=False),
+                json.dumps(model.worldview_json, ensure_ascii=False),
+                json.dumps(model.evidence_json, ensure_ascii=False),
+                json.dumps(model.confidence_json, ensure_ascii=False),
+                model.persona_prompt,
+                model.created_at,
+            ),
+        )
+        self._commit()
+
+    def get_author_life_model(self, model_id: str) -> AuthorLifeModel | None:
+        row = self.conn.execute("SELECT * FROM author_life_models WHERE model_id=?", (model_id,)).fetchone()
+        return _row_to_author_life_model(row) if row else None
+
+    def latest_author_life_model(self) -> AuthorLifeModel | None:
+        row = self.conn.execute(
+            "SELECT * FROM author_life_models ORDER BY created_at DESC, model_id DESC LIMIT 1"
+        ).fetchone()
+        return _row_to_author_life_model(row) if row else None
+
+    def style_corpus_summary(self) -> dict[str, Any]:
+        segments = self.list_style_segments()
+        clusters = self.list_style_clusters()
+        negatives = self.list_style_negative_samples(limit=100)
+        life_model = self.latest_author_life_model()
+        discourse: dict[str, int] = {}
+        voices: dict[str, int] = {}
+        scenes: dict[str, int] = {}
+        character_voices: dict[str, int] = {}
+        registers: dict[str, int] = {}
+        for seg in segments:
+            discourse[seg.discourse_type] = discourse.get(seg.discourse_type, 0) + 1
+            voices[seg.voice_type] = voices.get(seg.voice_type, 0) + 1
+            scenes[seg.scene_type] = scenes.get(seg.scene_type, 0) + 1
+            registers[seg.register_type] = registers.get(seg.register_type, 0) + 1
+            if seg.character_id and seg.voice_type == "character":
+                character_voices[seg.character_id] = character_voices.get(seg.character_id, 0) + 1
+        return {
+            "segmentCount": len(segments),
+            "clusterCount": len(clusters),
+            "negativeSampleCount": len(negatives),
+            "disabledSegmentCount": len([seg for seg in segments if not seg.enabled]),
+            "discourseCoverage": discourse,
+            "voiceCoverage": voices,
+            "sceneCoverage": scenes,
+            "registerCoverage": registers,
+            "characterVoiceCoverage": character_voices,
+            "lowConfidenceSegments": [
+                {
+                    "id": seg.id,
+                    "sourceChapterId": seg.source_chapter_id,
+                    "discourseType": seg.discourse_type,
+                    "voiceType": seg.voice_type,
+                    "confidence": seg.annotation_confidence,
+                    "text": seg.text[:120],
+                }
+                for seg in segments
+                if seg.annotation_confidence < 0.55
+            ][:8],
+            "clusters": [
+                {
+                    "id": cluster.id,
+                    "label": cluster.label,
+                    "clusterType": cluster.cluster_type,
+                    "representativeSegmentIds": cluster.representative_segment_ids_json[:6],
+                }
+                for cluster in clusters[:12]
+            ],
+            "experienceSourceCount": len(self.list_author_experience_sources(enabled_only=False)),
+            "experienceFragmentCount": len(self.list_author_experience_fragments()),
+            "lifeModel": {
+                "id": life_model.model_id,
+                "summary": life_model.summary,
+                "sourceLabel": life_model.source_label,
+                "coreWound": life_model.core_wound_json,
+                "defensePatterns": life_model.defense_patterns_json[:4],
+                "desireVectors": life_model.desire_vectors_json[:4],
+                "relationshipModel": life_model.relationship_model_json,
+                "proseRules": life_model.prose_rules_json,
+                "confidence": life_model.confidence_json,
+            } if life_model else None,
+        }
+
     def tone_profile_prompt(self) -> str:
-        """§16.5 文风前置块：统一插入所有生成提示词最前面。无契约则空。"""
         p = self.get_tone_profile()
         if not p.is_set():
             return ""
         lines = ["【文风契约 · 全程强制遵守，不得漂移】"]
         if p.genre or p.primary_effect:
-            lines.append(f"类型：{p.genre or '未定'}；本书每一场都必须交付的主效果：{p.primary_effect or '未定'}。")
+            lines.append(f"类型：{p.genre or '未定'}；主效果：{p.primary_effect or '未定'}。")
         if p.register or p.sentence_rhythm:
             lines.append(f"语域与节奏：{p.register or '未定'}，{p.sentence_rhythm or '未定'}。")
         if p.diction_do:
@@ -1348,43 +1913,14 @@ class Repository:
         if p.diction_dont:
             lines.append("禁忌（出现即判不合格）：" + "、".join(p.diction_dont[:8]) + "。")
         if p.device_kit:
-            lines.append("本类型惯用手法（优先调用）：" + "、".join(p.device_kit[:8]) + "。")
+            lines.append("惯用手法：" + "、".join(p.device_kit[:8]) + "。")
         if p.tone_reference:
-            lines.append(f"定调样例（向它的腔调对齐）：{p.tone_reference[:200]}")
+            lines.append(f"定调样例：{p.tone_reference[:200]}")
         lines.append(
-            "【名字与正文语言一致】人名、地名、专有名词的书写必须与正文语言一致："
-            "用中文写作时一律用中文名（外来名取音译，如『约翰』『艾琳』），"
-            "**不得出现拉丁字母拼写的名字（如 John、Elena）**；用英文写作时才用英文原名。"
+            "【名字与正文语言一致】中文正文一律用中文名，不得混入拉丁字母人名。"
         )
-        # B0.6 时代隔离墙（主题8）：防止现代对齐把前现代/奇幻角色写成"21 世纪现代人"。
-        el = p.era_logic or {}
-        if el.get("enabled"):
-            seg = ["【时代/语境隔离墙 · 绝对遵守】本作的世界观不是现代社会，角色的认知与逻辑必须落在其时代里。"]
-            mi, rl, sl = el.get("moral_index"), el.get("religiosity"), el.get("science_level")
-            knobs = []
-            if mi is not None:
-                knobs.append(f"道德指数 {mi}（越低越残酷、人命越轻）")
-            if rl is not None:
-                knobs.append(f"宗教/超自然狂热度 {rl}")
-            if sl is not None:
-                knobs.append(f"科学认知度 {sl}（越低越不懂因果/卫生/心理）")
-            if knobs:
-                seg.append("时代基调：" + "；".join(knobs) + "。")
-            bw = el.get("banned_modern_words") or []
-            if bw:
-                seg.append("**绝对禁用的现代词汇/概念**（出现即出戏）：" + "、".join(bw[:20])
-                           + "——也不得用它们的同义改写或现代心理学/管理学/人权话术。")
-            fa = (el.get("forced_attribution") or "").strip()
-            if fa:
-                seg.append(f"**强制时代逻辑**：{fa}")
-            else:
-                seg.append("**强制时代逻辑**：角色面对灾难/异象的第一本能是归因于神罚、诅咒、女巫、血统不纯、"
-                           "命运等当时代的解释，而不是寻找科学/心理学因果。")
-            lines.append("\n".join(seg))
-        lines.append("——以下你产出的任何内容，都必须落在这个基调里。")
         return "\n".join(lines)
 
-    # ---------- style_anchor（§4.3 叙述嗓音连续性） ----------
     def _ensure_style_anchor(self) -> None:
         self.conn.execute("INSERT OR IGNORE INTO style_anchor (id) VALUES (1)")
 
@@ -1399,13 +1935,12 @@ class Repository:
         }
 
     def set_tone_sample(self, text: str) -> None:
-        """定调：仅在尚未设定时写入（首场成稿即锁定参考语气）。"""
         self._ensure_style_anchor()
         cur = self.conn.execute("SELECT tone_sample FROM style_anchor WHERE id=1").fetchone()
         if cur and cur["tone_sample"]:
             return
         self.conn.execute("UPDATE style_anchor SET tone_sample=? WHERE id=1", (text[:400],))
-        self.conn.commit()
+        self._commit()
 
     def add_motifs(self, words: list[str]) -> None:
         self._ensure_style_anchor()
@@ -1415,7 +1950,7 @@ class Repository:
             "UPDATE style_anchor SET motif_lexicon=? WHERE id=1",
             (json.dumps(merged, ensure_ascii=False),),
         )
-        self.conn.commit()
+        self._commit()
 
     def add_banned_words(self, words: list[str]) -> None:
         self._ensure_style_anchor()
@@ -1425,27 +1960,19 @@ class Repository:
             "UPDATE style_anchor SET banned_words=? WHERE id=1",
             (json.dumps(merged, ensure_ascii=False),),
         )
-        self.conn.commit()
+        self._commit()
 
     def style_anchor_prompt(self) -> str:
-        """给叙述者的嗓音对齐块；无内容则空。
-
-        架构修复：**不再注入首场正文片段（tone_sample）作"定调参考"**——LLM 会把那段里的
-        场景/地点/道具/句子整段复刻，导致每场都重演同一画面（"同一拍演 4 次"的真因）。
-        语气/语域/句感由 tone_profile（register/sentence_rhythm/diction）抽象约束，无需正文样例。
-        这里只保留"已用意象（勿堆砌）"与"统一禁用词"这类**不泄漏具体内容**的对齐项。"""
         a = self.get_style_anchor()
         if not (a["motif_lexicon"] or a["banned_words"]):
             return ""
         parts = ["[嗓音一致性]"]
         if a["motif_lexicon"]:
-            parts.append("已用核心意象（可少量呼应，但**不要**把它们当本场画面来重复堆砌）："
-                         + "、".join(a["motif_lexicon"][:12]))
+            parts.append("已用核心意象（可少量呼应，不要重复堆砌）：" + "、".join(a["motif_lexicon"][:12]))
         if a["banned_words"]:
             parts.append("统一禁用词（不要使用）：" + "、".join(a["banned_words"][:12]))
         return "\n".join(parts)
 
-    # ---------- emotional_state（§4.2 情绪余温） ----------
     def bump_emotion(self, agent_id: str, emotion: str, intensity: float,
                      cause: str, tick: int, decay: float = 0.25) -> None:
         self.conn.execute(
@@ -1456,7 +1983,7 @@ class Repository:
                  cause=excluded.cause, decay=excluded.decay, updated_tick=excluded.updated_tick""",
             (agent_id, emotion, max(0.0, min(1.0, intensity)), cause, decay, tick),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_emotion(self, agent_id: str) -> "EmotionalState | None":
         r = self.conn.execute(
@@ -1470,7 +1997,6 @@ class Repository:
         )
 
     def emotional_residue_text(self, agent_id: str) -> str:
-        """供 agent prompt 的【你刚经历的】注入。强度过低视为已平复。"""
         e = self.get_emotion(agent_id)
         if not e or e.intensity < 0.15 or not e.emotion:
             return ""
@@ -1478,32 +2004,38 @@ class Repository:
         return f"你心里还压着一股{e.emotion}{because}，没那么快散。"
 
     def decay_emotions(self) -> None:
-        """每拍调用：所有情绪按各自 decay 衰减；接近平复则清除。"""
         self.conn.execute("UPDATE emotional_state SET intensity = intensity - decay")
         self.conn.execute("DELETE FROM emotional_state WHERE intensity <= 0.05")
-        self.conn.commit()
+        self._commit()
 
-    # ---------- factions（W3 势力一等实体） ----------
+    # ---------- factions锛圵3 鍔垮姏涓€绛夊疄浣擄級 ----------
     def upsert_faction(self, f: Faction) -> None:
         self.conn.execute(
             """INSERT INTO factions
                  (faction_id, name, ideology, goals, methods, territory, structure,
-                  key_members, history, relations, secret, summary, detail, source, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  key_members, history, relations, secret, summary, detail, source, created_at,
+                  foreshadow_from, reveal_chapter, secret_reveal_chapter, foreshadow_hint, secret_truth)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(faction_id) DO UPDATE SET
                  name=excluded.name, ideology=excluded.ideology, goals=excluded.goals,
                  methods=excluded.methods, territory=excluded.territory,
                  structure=excluded.structure, key_members=excluded.key_members,
                  history=excluded.history, relations=excluded.relations,
                  secret=excluded.secret, summary=excluded.summary, detail=excluded.detail,
-                 source=excluded.source""",
+                 source=excluded.source,
+                 foreshadow_from=excluded.foreshadow_from,
+                 reveal_chapter=excluded.reveal_chapter,
+                 secret_reveal_chapter=excluded.secret_reveal_chapter,
+                 foreshadow_hint=excluded.foreshadow_hint,
+                 secret_truth=excluded.secret_truth""",
             (f.faction_id, f.name, f.ideology, f.goals, f.methods,
              json.dumps(f.territory, ensure_ascii=False), f.structure,
              json.dumps(f.key_members, ensure_ascii=False), f.history,
              json.dumps(f.relations, ensure_ascii=False), f.secret,
-             f.summary, f.detail, f.source, f.created_at),
+             f.summary, f.detail, f.source, f.created_at, f.foreshadow_from,
+             f.reveal_chapter, f.secret_reveal_chapter, f.foreshadow_hint, f.secret_truth),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_faction(self, faction_id: str) -> Faction | None:
         r = self.conn.execute("SELECT * FROM factions WHERE faction_id=?", (faction_id,)).fetchone()
@@ -1514,13 +2046,10 @@ class Repository:
         return [_row_to_faction(r) for r in rows]
 
     def faction_summaries_text(self) -> str:
-        """W3 常驻注入：拼接势力 summary（一两句一节，token 极省）。"""
         rows = [f for f in self.list_factions() if (f.summary or "").strip()]
         return "\n".join(f"· {f.name}：{f.summary.strip()}" for f in rows)
 
-    # ---------- graph_edges（W5 知识图谱：静态边 + FactExtractor 增量 + 注意力时变权重） ----------
     def upsert_edge(self, e: GraphEdge) -> None:
-        """三元组 (src, rel, dst) 唯一；重复 upsert 替换（unique on conflict replace）。"""
         self.conn.execute(
             """INSERT INTO graph_edges (src, rel, dst, meta, since_chapter, until_chapter,
                                         intensity, last_active_chapter)
@@ -1528,7 +2057,7 @@ class Repository:
             (e.src, e.rel, e.dst, json.dumps(e.meta, ensure_ascii=False),
              e.since_chapter, e.until_chapter, e.intensity, e.last_active_chapter),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_edge(self, src: str, rel: str, dst: str) -> GraphEdge | None:
         r = self.conn.execute(
@@ -1539,20 +2068,21 @@ class Repository:
     def list_edges(self, *, src: str | None = None, dst: str | None = None,
                    rel: str | None = None) -> list[GraphEdge]:
         sql = "SELECT * FROM graph_edges WHERE 1=1"
-        args: list = []
+        args: list[Any] = []
         if src:
-            sql += " AND src=?"; args.append(src)
+            sql += " AND src=?"
+            args.append(src)
         if dst:
-            sql += " AND dst=?"; args.append(dst)
+            sql += " AND dst=?"
+            args.append(dst)
         if rel:
-            sql += " AND rel=?"; args.append(rel)
+            sql += " AND rel=?"
+            args.append(rel)
         sql += " ORDER BY id"
         return [_row_to_edge(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def bump_edge_attention(self, src: str, rel: str, dst: str, chapter: int,
                             delta: float = 0.15, meta_patch: dict | None = None) -> None:
-        """剧情活跃 → 升 intensity（clamp 0–1）+ 更新 last_active_chapter。
-        若边不存在则新建 intensity=0.5+delta。FactExtractor 每场对参与者两两调用。"""
         cur = self.get_edge(src, rel, dst)
         if cur is None:
             new_meta = dict(meta_patch or {})
@@ -1567,18 +2097,16 @@ class Repository:
         self.conn.execute(
             """UPDATE graph_edges SET intensity=?, last_active_chapter=?, meta=?
                WHERE src=? AND rel=? AND dst=?""",
-            (new_intensity, chapter, json.dumps(merged_meta, ensure_ascii=False),
-             src, rel, dst),
+            (new_intensity, chapter, json.dumps(merged_meta, ensure_ascii=False), src, rel, dst),
         )
-        self.conn.commit()
+        self._commit()
 
     def decay_edges(self, current_chapter: int, half_life: int = 6,
                     rels: tuple[str, ...] = ("related_to", "knows")) -> int:
-        """人物注意力衰减：久未活跃的边 intensity 按章距半衰减。
-        只衰减剧情型快变边（related_to/knows 默认）；静态边（member_of/controls/allied 等）不动。"""
         rows = self.conn.execute(
             f"SELECT id, intensity, last_active_chapter FROM graph_edges WHERE rel IN ({','.join('?'*len(rels))})",
-            rels).fetchall()
+            rels,
+        ).fetchall()
         n = 0
         for r in rows:
             gap = max(0, current_chapter - r["last_active_chapter"])
@@ -1588,14 +2116,13 @@ class Repository:
             new_i = max(0.0, r["intensity"] * factor)
             self.conn.execute("UPDATE graph_edges SET intensity=? WHERE id=?", (new_i, r["id"]))
             n += 1
-        self.conn.commit()
+        self._commit()
         return n
 
     def attention_ranked_neighbors(self, seed: str, *, limit: int = 12,
-                                    rels: tuple[str, ...] | None = None) -> list[GraphEdge]:
-        """W6 检索基础：按 intensity 降序拉 seed 的邻居边（双向）。"""
+                                   rels: tuple[str, ...] | None = None) -> list[GraphEdge]:
         sql = "SELECT * FROM graph_edges WHERE (src=? OR dst=?)"
-        args: list = [seed, seed]
+        args: list[Any] = [seed, seed]
         if rels:
             sql += f" AND rel IN ({','.join('?'*len(rels))})"
             args += list(rels)
@@ -1603,15 +2130,16 @@ class Repository:
         args.append(limit)
         return [_row_to_edge(r) for r in self.conn.execute(sql, args).fetchall()]
 
-    # ---------- character_cards（§1 选角层身份卡 + W4 三维度） ----------
+    # ---------- character_cards锛埪? 閫夎灞傝韩浠藉崱 + W4 涓夌淮搴︼級 ----------
     def add_card(self, c: CharacterCard) -> None:
         self.conn.execute(
             """INSERT INTO character_cards
                  (card_id, agent_id, tier, slot_key, name, one_liner, voice_register,
                   defining_trait, core_desire, verbal_habits, key_relation, backstory,
                   fatal_flaw, motif_objects, relationship_map, arc,
-                  appearance, social_role, psychology, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  appearance, social_role, psychology, created_at, foreshadow_from,
+                  reveal_chapter, secret_reveal_chapter, foreshadow_hint, secret_truth)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(card_id) DO UPDATE SET
                  agent_id=excluded.agent_id, tier=excluded.tier, slot_key=excluded.slot_key,
                  name=excluded.name, one_liner=excluded.one_liner,
@@ -1621,16 +2149,23 @@ class Repository:
                  fatal_flaw=excluded.fatal_flaw, motif_objects=excluded.motif_objects,
                  relationship_map=excluded.relationship_map, arc=excluded.arc,
                  appearance=excluded.appearance, social_role=excluded.social_role,
-                 psychology=excluded.psychology""",
+                 psychology=excluded.psychology,
+                 foreshadow_from=excluded.foreshadow_from,
+                 reveal_chapter=excluded.reveal_chapter,
+                 secret_reveal_chapter=excluded.secret_reveal_chapter,
+                 foreshadow_hint=excluded.foreshadow_hint,
+                 secret_truth=excluded.secret_truth""",
             (
                 c.card_id, c.agent_id, c.tier, c.slot_key, c.name, c.one_liner, c.voice_register,
                 c.defining_trait, c.core_desire, c.verbal_habits, c.key_relation, c.backstory,
                 c.fatal_flaw, json.dumps(c.motif_objects, ensure_ascii=False),
                 json.dumps(c.relationship_map, ensure_ascii=False), c.arc,
                 c.appearance, c.social_role, c.psychology, c.created_at,
+                c.foreshadow_from, c.reveal_chapter, c.secret_reveal_chapter,
+                c.foreshadow_hint, c.secret_truth,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_card_by_slot(self, slot_key: str) -> CharacterCard | None:
         r = self.conn.execute(
@@ -1648,7 +2183,184 @@ class Repository:
         rows = self.conn.execute("SELECT * FROM character_cards").fetchall()
         return [_row_to_card(r) for r in rows]
 
-    # ---------- llm_logs（LLM 对话日志） ----------
+    # ---------- naming profiles ----------
+    def upsert_naming_profile(self, profile: NamingProfile) -> None:
+        payload = {
+            "scope": profile.scope,
+            "label": profile.label,
+            "genre": profile.genre,
+            "culture_source": profile.culture_source,
+            "phonology_style": profile.phonology_style,
+            "primary_length_min": profile.primary_length_min,
+            "primary_length_max": profile.primary_length_max,
+            "allow_surname": profile.allow_surname,
+            "allow_compound_given_name": profile.allow_compound_given_name,
+            "allow_middle_dot": profile.allow_middle_dot,
+            "allow_hyphen": profile.allow_hyphen,
+            "allow_space": profile.allow_space,
+            "nickname_rules": profile.nickname_rules,
+            "honorific_rules": profile.honorific_rules,
+            "faction_variance_policy": profile.faction_variance_policy,
+            "rare_structure_quota": profile.rare_structure_quota,
+            "motif_token_budget": profile.motif_token_budget,
+            "banned_tokens": profile.banned_tokens,
+            "danger_tokens": profile.danger_tokens,
+            "stopwords_for_primary": profile.stopwords_for_primary,
+            "version": profile.version,
+        }
+        self.conn.execute(
+            """INSERT INTO naming_profiles
+                 (profile_id, scope, label, profile_json, active_version, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(profile_id) DO UPDATE SET
+                 scope=excluded.scope, label=excluded.label, profile_json=excluded.profile_json,
+                 active_version=excluded.active_version, updated_at=excluded.updated_at""",
+            (
+                profile.profile_id,
+                profile.scope,
+                profile.label,
+                json.dumps(payload, ensure_ascii=False),
+                profile.version,
+                "",
+                "",
+            ),
+        )
+        self._commit()
+
+    def get_naming_profile(self, profile_id: str | None = None) -> NamingProfile | None:
+        if profile_id:
+            row = self.conn.execute("SELECT * FROM naming_profiles WHERE profile_id=?", (profile_id,)).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM naming_profiles ORDER BY rowid LIMIT 1").fetchone()
+        return _row_to_naming_profile(row) if row else None
+
+    def upsert_culture_naming_style(self, style: CultureNamingStyle) -> None:
+        payload = {
+            "parent_style_id": style.parent_style_id,
+            "surname_pool": style.surname_pool,
+            "given_name_pool": style.given_name_pool,
+            "title_pool": style.title_pool,
+            "morphology_templates": style.morphology_templates,
+            "disallowed_templates": style.disallowed_templates,
+            "nickname_patterns": style.nickname_patterns,
+            "honorific_patterns": style.honorific_patterns,
+            "enemy_label_patterns": style.enemy_label_patterns,
+            "symbol_policy": style.symbol_policy,
+        }
+        self.conn.execute(
+            """INSERT INTO culture_naming_styles
+                 (style_id, profile_id, culture_id, culture_name, style_json, fingerprint_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(style_id) DO UPDATE SET
+                 profile_id=excluded.profile_id, culture_id=excluded.culture_id, culture_name=excluded.culture_name,
+                 style_json=excluded.style_json, fingerprint_json=excluded.fingerprint_json,
+                 updated_at=excluded.updated_at""",
+            (
+                style.style_id,
+                style.profile_id,
+                style.culture_id,
+                style.culture_name,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(style.style_fingerprint, ensure_ascii=False),
+                "",
+                "",
+            ),
+        )
+        self._commit()
+
+    def list_culture_naming_styles(self, profile_id: str | None = None) -> list[CultureNamingStyle]:
+        if profile_id:
+            rows = self.conn.execute(
+                "SELECT * FROM culture_naming_styles WHERE profile_id=? ORDER BY style_id", (profile_id,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM culture_naming_styles ORDER BY style_id").fetchall()
+        return [_row_to_culture_naming_style(r) for r in rows]
+
+    def get_culture_naming_style(self, style_id: str) -> CultureNamingStyle | None:
+        row = self.conn.execute("SELECT * FROM culture_naming_styles WHERE style_id=?", (style_id,)).fetchone()
+        return _row_to_culture_naming_style(row) if row else None
+
+    def upsert_character_name(self, record: CharacterNameRecord) -> None:
+        self.conn.execute(
+            """INSERT INTO character_names
+                 (agent_id, profile_id, culture_style_id, primary_name, short_name, nickname,
+                  honorific, public_alias, self_ref, enemy_label, display_name_locked,
+                  normalized_name, name_parts_json, source, status, replaced_by_agent_id,
+                  audit_flags_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(agent_id) DO UPDATE SET
+                 profile_id=excluded.profile_id, culture_style_id=excluded.culture_style_id,
+                 primary_name=excluded.primary_name, short_name=excluded.short_name,
+                 nickname=excluded.nickname, honorific=excluded.honorific,
+                 public_alias=excluded.public_alias, self_ref=excluded.self_ref,
+                 enemy_label=excluded.enemy_label, display_name_locked=excluded.display_name_locked,
+                 normalized_name=excluded.normalized_name, name_parts_json=excluded.name_parts_json,
+                 source=excluded.source, status=excluded.status,
+                 replaced_by_agent_id=excluded.replaced_by_agent_id,
+                 audit_flags_json=excluded.audit_flags_json, updated_at=excluded.updated_at""",
+            (
+                record.agent_id,
+                record.profile_id,
+                record.culture_style_id,
+                record.primary_name,
+                record.short_name,
+                record.nickname,
+                record.honorific,
+                record.public_alias,
+                record.self_ref,
+                record.enemy_label,
+                record.display_name_locked,
+                record.primary_name_normalized,
+                json.dumps(record.name_parts_json, ensure_ascii=False),
+                record.source,
+                record.status,
+                record.replaced_by_agent_id,
+                json.dumps(record.audit_flags, ensure_ascii=False),
+                record.created_at,
+                record.updated_at,
+            ),
+        )
+        self._commit()
+
+    def get_character_name(self, agent_id: str) -> CharacterNameRecord | None:
+        row = self.conn.execute("SELECT * FROM character_names WHERE agent_id=?", (agent_id,)).fetchone()
+        return _row_to_character_name(row) if row else None
+
+    def list_character_names(self) -> list[CharacterNameRecord]:
+        rows = self.conn.execute("SELECT * FROM character_names ORDER BY agent_id").fetchall()
+        return [_row_to_character_name(r) for r in rows]
+
+    def get_character_display_name(self, agent_id: str, fallback: str = "") -> str:
+        record = self.get_character_name(agent_id)
+        if record and record.display_name_locked:
+            return record.display_name_locked
+        entity = self.get_entity(agent_id)
+        return entity.name if entity and entity.name else fallback
+
+    def append_character_name_history(
+        self,
+        agent_id: str,
+        old_primary_name: str,
+        new_primary_name: str,
+        reason: str,
+        migration_batch_id: str = "",
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO character_name_history
+                 (agent_id, old_primary_name, new_primary_name, reason, migration_batch_id, created_at)
+               VALUES (?, ?, ?, ?, ?, '')""",
+            (agent_id, old_primary_name, new_primary_name, reason, migration_batch_id),
+        )
+        self._commit()
+
+    def list_character_name_history(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM character_name_history ORDER BY id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---------- llm_logs锛圠LM 瀵硅瘽鏃ュ織锛?----------
     def list_llm_logs(self, limit: int = 200, caller: str | None = None) -> list[dict]:
         sql = "SELECT * FROM llm_logs"
         args: list = []
@@ -1680,8 +2392,672 @@ class Repository:
             return {"callers": []}
         return {"callers": [dict(r) for r in rows]}
 
+    # ---------- unified chapter pipeline ----------
+    def get_project_meta(self) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM project_meta WHERE id=1").fetchone()
+        if row is None:
+            self.conn.execute("INSERT OR IGNORE INTO project_meta (id) VALUES (1)")
+            self._commit()
+            row = self.conn.execute("SELECT * FROM project_meta WHERE id=1").fetchone()
+        return dict(row)
 
-# ---------- row → dataclass 辅助 ----------
+    def set_project_meta(self, *, project_type: str | None = None,
+                         project_status: str | None = None,
+                         analysis_status: str | None = None,
+                         source_text_hash: str | None = None,
+                         continuation_hint: str | None = None,
+                         series_id: str | None = None,
+                         source_book_title: str | None = None,
+                         current_book_title: str | None = None,
+                         book_index: int | None = None,
+                         write_mode: str | None = None,
+                         chapter_start_no: int | None = None,
+                          latest_source_chapter_no: int | None = None,
+                          continuation_ready: bool | None = None,
+                          continuation_phase: str | None = None,
+                          time_position: str | None = None,
+                          protagonist_strategy: str | None = None,
+                          inherit_unresolved_threads: bool | None = None,
+                          experience_layer_enabled: bool | None = None,
+                          experience_layer_mode: str | None = None,
+                          experience_source_path: str | None = None,
+                          experience_style_level: str | None = None,
+                          active_life_model_id: str | None = None) -> None:
+        cur = self.get_project_meta()
+        self.conn.execute(
+            """INSERT INTO project_meta (
+                   id, project_type, project_status, analysis_status,
+                   source_text_hash, continuation_hint, series_id,
+                   source_book_title, current_book_title, book_index,
+                   write_mode, chapter_start_no, latest_source_chapter_no,
+                   continuation_ready, continuation_phase, time_position,
+                   protagonist_strategy, inherit_unresolved_threads,
+                   experience_layer_enabled, experience_layer_mode, experience_source_path,
+                   experience_style_level, active_life_model_id
+               )
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_type=excluded.project_type,
+                 project_status=excluded.project_status,
+                 analysis_status=excluded.analysis_status,
+                 source_text_hash=excluded.source_text_hash,
+                 continuation_hint=excluded.continuation_hint,
+                 series_id=excluded.series_id,
+                 source_book_title=excluded.source_book_title,
+                 current_book_title=excluded.current_book_title,
+                 book_index=excluded.book_index,
+                 write_mode=excluded.write_mode,
+                 chapter_start_no=excluded.chapter_start_no,
+                 latest_source_chapter_no=excluded.latest_source_chapter_no,
+                 continuation_ready=excluded.continuation_ready,
+                 continuation_phase=excluded.continuation_phase,
+                 time_position=excluded.time_position,
+                 protagonist_strategy=excluded.protagonist_strategy,
+                 inherit_unresolved_threads=excluded.inherit_unresolved_threads,
+                 experience_layer_enabled=excluded.experience_layer_enabled,
+                 experience_layer_mode=excluded.experience_layer_mode,
+                 experience_source_path=excluded.experience_source_path,
+                 experience_style_level=excluded.experience_style_level,
+                 active_life_model_id=excluded.active_life_model_id""",
+            (
+                project_type or cur["project_type"],
+                project_status or cur["project_status"],
+                analysis_status or cur["analysis_status"],
+                source_text_hash if source_text_hash is not None else cur.get("source_text_hash", ""),
+                continuation_hint if continuation_hint is not None else cur.get("continuation_hint", ""),
+                series_id if series_id is not None else cur.get("series_id", ""),
+                source_book_title if source_book_title is not None else cur.get("source_book_title", ""),
+                current_book_title if current_book_title is not None else cur.get("current_book_title", ""),
+                int(book_index if book_index is not None else cur.get("book_index", 1) or 1),
+                write_mode if write_mode is not None else cur.get("write_mode", ""),
+                int(chapter_start_no if chapter_start_no is not None else cur.get("chapter_start_no", 1) or 1),
+                int(latest_source_chapter_no if latest_source_chapter_no is not None else cur.get("latest_source_chapter_no", 0) or 0),
+                1 if (continuation_ready if continuation_ready is not None else bool(cur.get("continuation_ready", 0))) else 0,
+                continuation_phase if continuation_phase is not None else cur.get("continuation_phase", ""),
+                time_position if time_position is not None else cur.get("time_position", ""),
+                protagonist_strategy if protagonist_strategy is not None else cur.get("protagonist_strategy", ""),
+                1 if (inherit_unresolved_threads if inherit_unresolved_threads is not None else bool(cur.get("inherit_unresolved_threads", 1))) else 0,
+                1 if (experience_layer_enabled if experience_layer_enabled is not None else bool(cur.get("experience_layer_enabled", 0))) else 0,
+                experience_layer_mode if experience_layer_mode is not None else cur.get("experience_layer_mode", "off"),
+                experience_source_path if experience_source_path is not None else cur.get("experience_source_path", ""),
+                experience_style_level if experience_style_level is not None else cur.get("experience_style_level", "none"),
+                active_life_model_id if active_life_model_id is not None else cur.get("active_life_model_id", ""),
+            ),
+        )
+        self._commit()
+
+    def get_story_timeline(self) -> list[dict[str, Any]]:
+        """故事时钟时间线（轻量 JSON）：[{chapter_no, end_clock, end_clock_text, deadlines:[...]}]。"""
+        row = self.conn.execute("SELECT timeline_json FROM project_meta WHERE id=1").fetchone()
+        if row is None:
+            self.conn.execute("INSERT OR IGNORE INTO project_meta (id) VALUES (1)")
+            self._commit()
+            return []
+        try:
+            data = json.loads(row["timeline_json"] or "[]")
+        except Exception:
+            return []
+        return data if isinstance(data, list) else []
+
+    def set_story_timeline(self, timeline: list[dict[str, Any]]) -> None:
+        self.conn.execute("INSERT OR IGNORE INTO project_meta (id) VALUES (1)")
+        self.conn.execute(
+            "UPDATE project_meta SET timeline_json=? WHERE id=1",
+            (json.dumps(timeline or [], ensure_ascii=False),),
+        )
+        self._commit()
+
+    def upsert_timeline_entry(self, entry: dict[str, Any]) -> None:
+        """按 chapter_no 落入/覆盖一章的时间线条目，并保持按章号有序。"""
+        chapter_no = int(entry.get("chapter_no", 0) or 0)
+        if chapter_no <= 0:
+            return
+        timeline = [r for r in self.get_story_timeline()
+                    if int(r.get("chapter_no", 0) or 0) != chapter_no]
+        timeline.append(entry)
+        timeline.sort(key=lambda r: int(r.get("chapter_no", 0) or 0))
+        self.set_story_timeline(timeline)
+
+    def get_build_checkpoints(self) -> dict[str, Any]:
+        row = self.conn.execute("SELECT build_checkpoints_json FROM project_meta WHERE id=1").fetchone()
+        if row is None:
+            self.conn.execute("INSERT OR IGNORE INTO project_meta (id) VALUES (1)")
+            self._commit()
+            return {}
+        try:
+            data = json.loads(row["build_checkpoints_json"] or "{}")
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def set_build_checkpoints(self, checkpoints: dict[str, Any]) -> None:
+        self.conn.execute(
+            "UPDATE project_meta SET build_checkpoints_json=? WHERE id=1",
+            (json.dumps(checkpoints or {}, ensure_ascii=False),),
+        )
+        self._commit()
+
+    def mark_build_checkpoint(self, stage: str, status: str, *,
+                              error: str = "", meta: dict[str, Any] | None = None) -> None:
+        checkpoints = self.get_build_checkpoints()
+        checkpoints[stage] = {
+            "status": status,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "error": error or "",
+            "meta": meta or {},
+        }
+        self.set_build_checkpoints(checkpoints)
+
+    def build_checkpoint_status(self, stage: str) -> str:
+        item = self.get_build_checkpoints().get(stage)
+        if isinstance(item, dict):
+            return str(item.get("status") or "")
+        if isinstance(item, str):
+            return item
+        return ""
+
+    def get_continuation_meta(self) -> ContinuationMeta:
+        cur = self.get_project_meta()
+        return ContinuationMeta(
+            source_text_hash=cur.get("source_text_hash", "") or "",
+            continuation_hint=cur.get("continuation_hint", "") or "",
+            series_id=cur.get("series_id", "") or "",
+            source_book_title=cur.get("source_book_title", "") or "",
+            current_book_title=cur.get("current_book_title", "") or "",
+            book_index=int(cur.get("book_index", 1) or 1),
+            write_mode=cur.get("write_mode", "") or "",
+            chapter_start_no=int(cur.get("chapter_start_no", 1) or 1),
+            latest_source_chapter_no=int(cur.get("latest_source_chapter_no", 0) or 0),
+            continuation_ready=bool(cur.get("continuation_ready", 0)),
+            continuation_phase=cur.get("continuation_phase", "") or "",
+            time_position=cur.get("time_position", "") or "",
+            protagonist_strategy=cur.get("protagonist_strategy", "") or "",
+            inherit_unresolved_threads=bool(cur.get("inherit_unresolved_threads", 1)),
+            experience_layer_enabled=bool(cur.get("experience_layer_enabled", 0)),
+            experience_layer_mode=cur.get("experience_layer_mode", "off") or "off",
+            experience_source_path=cur.get("experience_source_path", "") or "",
+            experience_style_level=cur.get("experience_style_level", "none") or "none",
+            active_life_model_id=cur.get("active_life_model_id", "") or "",
+        )
+
+    def set_continuation_meta(self, meta: ContinuationMeta) -> None:
+        self.set_project_meta(
+            source_text_hash=meta.source_text_hash,
+            continuation_hint=meta.continuation_hint,
+            series_id=meta.series_id,
+            source_book_title=meta.source_book_title,
+            current_book_title=meta.current_book_title,
+            book_index=meta.book_index,
+            write_mode=meta.write_mode,
+            chapter_start_no=meta.chapter_start_no,
+            latest_source_chapter_no=meta.latest_source_chapter_no,
+            continuation_ready=meta.continuation_ready,
+            continuation_phase=meta.continuation_phase,
+            time_position=meta.time_position,
+            protagonist_strategy=meta.protagonist_strategy,
+            inherit_unresolved_threads=meta.inherit_unresolved_threads,
+            experience_layer_enabled=meta.experience_layer_enabled,
+            experience_layer_mode=meta.experience_layer_mode,
+            experience_source_path=meta.experience_source_path,
+            experience_style_level=meta.experience_style_level,
+            active_life_model_id=meta.active_life_model_id,
+        )
+
+    def upsert_story_bible_record(self, rec: StoryBibleRecord) -> None:
+        self.conn.execute(
+            """INSERT INTO story_bible_v2
+                 (id, project_id, source_type, title_style_json, world_config_json,
+                  characters_json, locations_json, factions_json, items_json,
+                  relationships_json, timeline_json, open_threads_json,
+                  last_state_json, narrative_constraints_json,
+                  style_profile_id, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 source_type=excluded.source_type,
+                 title_style_json=excluded.title_style_json,
+                 world_config_json=excluded.world_config_json,
+                 characters_json=excluded.characters_json,
+                 locations_json=excluded.locations_json,
+                 factions_json=excluded.factions_json,
+                 items_json=excluded.items_json,
+                 relationships_json=excluded.relationships_json,
+                 timeline_json=excluded.timeline_json,
+                 open_threads_json=excluded.open_threads_json,
+                 last_state_json=excluded.last_state_json,
+                 narrative_constraints_json=excluded.narrative_constraints_json,
+                 style_profile_id=excluded.style_profile_id,
+                 updated_at=excluded.updated_at""",
+            (
+                rec.project_id,
+                rec.source_type,
+                json.dumps(rec.title_style_json, ensure_ascii=False),
+                json.dumps(rec.world_config_json, ensure_ascii=False),
+                json.dumps(rec.characters_json, ensure_ascii=False),
+                json.dumps(rec.locations_json, ensure_ascii=False),
+                json.dumps(rec.factions_json, ensure_ascii=False),
+                json.dumps(rec.items_json, ensure_ascii=False),
+                json.dumps(rec.relationships_json, ensure_ascii=False),
+                json.dumps(rec.timeline_json, ensure_ascii=False),
+                json.dumps(rec.open_threads_json, ensure_ascii=False),
+                json.dumps(rec.last_state_json, ensure_ascii=False),
+                json.dumps(rec.narrative_constraints_json, ensure_ascii=False),
+                rec.style_profile_id,
+                rec.updated_at,
+            ),
+        )
+        self._commit()
+
+    def get_story_bible_record(self) -> StoryBibleRecord | None:
+        row = self.conn.execute("SELECT * FROM story_bible_v2 WHERE id=1").fetchone()
+        return _row_to_story_bible_record(row) if row else None
+
+    def set_writing_settings(self, rec: WritingSettings) -> None:
+        self.conn.execute(
+            """INSERT INTO writing_settings
+                 (id, project_id, target_words, min_words, max_words, outline_first,
+                  auto_chapter_count, require_human_acceptance, style_profile_id)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 target_words=excluded.target_words,
+                 min_words=excluded.min_words,
+                 max_words=excluded.max_words,
+                 outline_first=excluded.outline_first,
+                 auto_chapter_count=excluded.auto_chapter_count,
+                 require_human_acceptance=excluded.require_human_acceptance,
+                 style_profile_id=excluded.style_profile_id""",
+            (
+                rec.project_id,
+                rec.target_words,
+                rec.min_words,
+                rec.max_words,
+                1 if rec.outline_first else 0,
+                rec.auto_chapter_count,
+                1 if rec.require_human_acceptance else 0,
+                rec.style_profile_id,
+            ),
+        )
+        self._commit()
+
+    def get_writing_settings(self) -> WritingSettings:
+        row = self.conn.execute("SELECT * FROM writing_settings WHERE id=1").fetchone()
+        return _row_to_writing_settings(row) if row else WritingSettings()
+
+    def insert_source_document(self, doc: SourceDocument) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO source_documents (project_id, filename, format, raw_text, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (doc.project_id, doc.filename, doc.format, doc.raw_text, doc.created_at),
+        )
+        self._commit()
+        return int(cur.lastrowid)
+
+    def clear_source_material(self) -> None:
+        self.conn.execute("DELETE FROM style_negative_samples")
+        self.conn.execute("DELETE FROM style_clusters")
+        self.conn.execute("DELETE FROM style_segments")
+        self.conn.execute("DELETE FROM source_chunks")
+        self.conn.execute("DELETE FROM source_chapters")
+        self.conn.execute("DELETE FROM source_documents")
+        self._commit()
+
+    def list_source_documents(self) -> list[SourceDocument]:
+        rows = self.conn.execute("SELECT * FROM source_documents ORDER BY id").fetchall()
+        return [_row_to_source_document(r) for r in rows]
+
+    def insert_source_chapter(self, ch: SourceChapter) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO source_chapters
+                 (project_id, source_document_id, chapter_no, title, text, word_count, summary, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ch.project_id, ch.source_document_id, ch.chapter_no, ch.title, ch.text,
+             ch.word_count, ch.summary, ch.created_at),
+        )
+        self._commit()
+        return int(cur.lastrowid)
+
+    def update_source_chapter(self, chapter_id: int, *, title: str | None = None,
+                              text: str | None = None, summary: str | None = None) -> None:
+        row = self.conn.execute("SELECT * FROM source_chapters WHERE id=?", (chapter_id,)).fetchone()
+        if row is None:
+            return
+        self.conn.execute(
+            """UPDATE source_chapters
+               SET title=?, text=?, word_count=?, summary=?
+               WHERE id=?""",
+            (
+                title if title is not None else row["title"],
+                text if text is not None else row["text"],
+                len((text if text is not None else row["text"]).strip()),
+                summary if summary is not None else row["summary"],
+                chapter_id,
+            ),
+        )
+        self._commit()
+
+    def list_source_chapters(self) -> list[SourceChapter]:
+        rows = self.conn.execute("SELECT * FROM source_chapters ORDER BY chapter_no, id").fetchall()
+        return [_row_to_source_chapter(r) for r in rows]
+
+    # ===== 瀹屽叏钂搁锛氭瘡绔犱簨浠?/ 浜虹墿蹇収 / 璁惧畾 codex / 鍓ф儏涓荤嚎 / 浼忕瑪 =====
+    def clear_distillation_artifacts(self) -> None:
+        self.conn.execute("DELETE FROM source_events")
+        self.conn.execute("DELETE FROM character_state_snapshots")
+        self.conn.execute("DELETE FROM settings_codex")
+        self.conn.execute("DELETE FROM story_arcs")
+        self.conn.execute("DELETE FROM foreshadow_setups")
+        self._commit()
+
+    def insert_source_event(self, *, event_id: str, chapter_no: int, seq: int, summary: str,
+                            participants: list[str], location: str, time_marker: str, kind: str,
+                            causes_from: list[str], effects: str, created_at: str) -> None:
+        self.conn.execute(
+            """INSERT INTO source_events
+                 (event_id, project_id, chapter_no, seq, summary, participants_json, location,
+                  time_marker, kind, causes_from_json, effects, created_at)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id,
+                chapter_no,
+                seq,
+                summary,
+                json.dumps(participants, ensure_ascii=False),
+                location,
+                time_marker,
+                kind,
+                json.dumps(causes_from, ensure_ascii=False),
+                effects,
+                created_at,
+            ),
+        )
+        self._commit()
+
+    def list_source_events(self, chapter_no: int | None = None) -> list[dict[str, Any]]:
+        if chapter_no is None:
+            rows = self.conn.execute("SELECT * FROM source_events ORDER BY chapter_no, seq").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM source_events WHERE chapter_no=? ORDER BY seq", (chapter_no,)).fetchall()
+        return [{
+            "event_id": r["event_id"], "chapter_no": r["chapter_no"], "seq": r["seq"],
+            "summary": r["summary"], "participants": json.loads(r["participants_json"] or "[]"),
+            "location": r["location"], "time_marker": r["time_marker"], "kind": r["kind"],
+            "causes_from": json.loads(r["causes_from_json"] or "[]"), "effects": r["effects"],
+        } for r in rows]
+
+    def insert_character_snapshot(self, *, chapter_no: int, character_name: str,
+                                  snapshot: dict[str, Any], changed_fields: list[str]) -> None:
+        self.conn.execute(
+            """INSERT INTO character_state_snapshots
+                 (project_id, chapter_no, character_name, snapshot_json, changed_fields_json)
+               VALUES ('', ?, ?, ?, ?)""",
+            (chapter_no, character_name, json.dumps(snapshot, ensure_ascii=False),
+             json.dumps(changed_fields, ensure_ascii=False)),
+        )
+        self._commit()
+
+    def list_character_snapshots(self, character_name: str | None = None) -> list[dict[str, Any]]:
+        if character_name is None:
+            rows = self.conn.execute(
+                "SELECT * FROM character_state_snapshots ORDER BY chapter_no, character_name").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM character_state_snapshots WHERE character_name=? ORDER BY chapter_no",
+                (character_name,)).fetchall()
+        return [{
+            "chapter_no": r["chapter_no"], "character_name": r["character_name"],
+            "snapshot": json.loads(r["snapshot_json"] or "{}"),
+            "changed_fields": json.loads(r["changed_fields_json"] or "[]"),
+        } for r in rows]
+
+    def latest_snapshot_before(self, character_name: str, chapter_no: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT snapshot_json FROM character_state_snapshots WHERE character_name=? AND chapter_no<? "
+            "ORDER BY chapter_no DESC LIMIT 1", (character_name, chapter_no)).fetchone()
+        return json.loads(row["snapshot_json"] or "{}") if row else None
+
+    def upsert_codex(self, *, codex_id: str, name: str, type_: str, kind: str, summary: str,
+                     evidence_chapter: int, evidence_excerpt: str) -> None:
+        existing = self.conn.execute("SELECT first_appeared FROM settings_codex WHERE codex_id=?",
+                                     (codex_id,)).fetchone()
+        first = existing["first_appeared"] if existing else evidence_chapter
+        self.conn.execute(
+            """INSERT OR REPLACE INTO settings_codex
+                 (codex_id, project_id, name, type, kind, summary, evidence_chapter,
+                  evidence_excerpt, first_appeared, last_updated)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (codex_id, name, type_, kind, summary, evidence_chapter, evidence_excerpt,
+             first, evidence_chapter),
+        )
+        self._commit()
+
+    def list_codex(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM settings_codex ORDER BY first_appeared, name").fetchall()
+        return [{
+            "codex_id": r["codex_id"], "name": r["name"], "type": r["type"], "kind": r["kind"],
+            "summary": r["summary"], "evidence_chapter": r["evidence_chapter"],
+            "evidence_excerpt": r["evidence_excerpt"], "first_appeared": r["first_appeared"],
+        } for r in rows]
+
+    def upsert_story_arc(self, *, arc_id: str, name: str, theme: str, key_events: list[str],
+                         turning_points: list[str], journey_summary: str, resolution_status: str) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO story_arcs
+                 (arc_id, project_id, name, theme, key_events_json, turning_points_json,
+                  journey_summary, resolution_status)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?)""",
+            (arc_id, name, theme, json.dumps(key_events, ensure_ascii=False),
+             json.dumps(turning_points, ensure_ascii=False), journey_summary, resolution_status),
+        )
+        self._commit()
+
+    def list_story_arcs(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM story_arcs ORDER BY arc_id").fetchall()
+        return [{
+            "arc_id": r["arc_id"], "name": r["name"], "theme": r["theme"],
+            "key_events": json.loads(r["key_events_json"] or "[]"),
+            "turning_points": json.loads(r["turning_points_json"] or "[]"),
+            "journey_summary": r["journey_summary"], "resolution_status": r["resolution_status"],
+        } for r in rows]
+
+    def insert_foreshadow(self, *, setup_id: str, chapter_no: int, excerpt: str, what_planted: str,
+                          why_suspect: str, salience: float) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO foreshadow_setups
+                 (setup_id, project_id, chapter_no, excerpt, what_planted, why_suspect, salience, status)
+               VALUES (?, '', ?, ?, ?, ?, ?, 'pending')""",
+            (setup_id, chapter_no, excerpt, what_planted, why_suspect, float(salience)),
+        )
+        self._commit()
+
+    def update_foreshadow_pairing(self, *, setup_id: str, status: str, payoff_event_id: str = "",
+                                  payoff_chapter: int = 0, confidence: float = 0.0, reason: str = "") -> None:
+        self.conn.execute(
+            """UPDATE foreshadow_setups SET status=?, payoff_event_id=?, payoff_chapter=?,
+                 confidence=?, reason=? WHERE setup_id=?""",
+            (status, payoff_event_id, payoff_chapter, float(confidence), reason, setup_id),
+        )
+        self._commit()
+
+    def list_foreshadows(self, status: str | None = None) -> list[dict[str, Any]]:
+        if status is None:
+            rows = self.conn.execute("SELECT * FROM foreshadow_setups ORDER BY chapter_no, setup_id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM foreshadow_setups WHERE status=? ORDER BY chapter_no", (status,)).fetchall()
+        return [{
+            "setup_id": r["setup_id"], "chapter_no": r["chapter_no"], "excerpt": r["excerpt"],
+            "what_planted": r["what_planted"], "why_suspect": r["why_suspect"], "salience": r["salience"],
+            "status": r["status"], "payoff_event_id": r["payoff_event_id"],
+            "payoff_chapter": r["payoff_chapter"], "confidence": r["confidence"], "reason": r["reason"],
+        } for r in rows]
+
+    def upsert_continuation_job(self, job: ContinuationJobRecord) -> None:
+        self.conn.execute(
+            """INSERT INTO continuation_jobs
+                 (id, project_id, phase, progress, total, status, error, config_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 project_id=excluded.project_id,
+                 phase=excluded.phase,
+                 progress=excluded.progress,
+                 total=excluded.total,
+                 status=excluded.status,
+                 error=excluded.error,
+                 config_json=excluded.config_json,
+                 created_at=excluded.created_at,
+                 updated_at=excluded.updated_at""",
+            (
+                job.id,
+                job.project_id,
+                job.phase,
+                job.progress,
+                job.total,
+                job.status,
+                job.error,
+                json.dumps(job.config_json, ensure_ascii=False),
+                job.created_at,
+                job.updated_at,
+            ),
+        )
+        self._commit()
+
+    def get_continuation_job(self, job_id: str) -> ContinuationJobRecord | None:
+        row = self.conn.execute("SELECT * FROM continuation_jobs WHERE id=?", (job_id,)).fetchone()
+        return _row_to_continuation_job(row) if row else None
+
+    def latest_continuation_job(self) -> ContinuationJobRecord | None:
+        row = self.conn.execute(
+            "SELECT * FROM continuation_jobs ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return _row_to_continuation_job(row) if row else None
+
+    def list_continuation_jobs(self) -> list[ContinuationJobRecord]:
+        rows = self.conn.execute(
+            "SELECT * FROM continuation_jobs ORDER BY updated_at DESC, created_at DESC, id DESC"
+        ).fetchall()
+        return [_row_to_continuation_job(r) for r in rows]
+
+    def insert_source_chunk(self, chunk: SourceChunk) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO source_chunks
+                 (project_id, chapter_id, chunk_no, text, summary, embedding_key)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (chunk.project_id, chunk.chapter_id, chunk.chunk_no, chunk.text, chunk.summary, chunk.embedding_key),
+        )
+        self._commit()
+        return int(cur.lastrowid)
+
+    def list_source_chunks(self, chapter_id: int | None = None) -> list[SourceChunk]:
+        if chapter_id is None:
+            rows = self.conn.execute("SELECT * FROM source_chunks ORDER BY chapter_id, chunk_no, id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM source_chunks WHERE chapter_id=? ORDER BY chunk_no, id", (chapter_id,)
+            ).fetchall()
+        return [_row_to_source_chunk(r) for r in rows]
+
+    def create_chapter_draft(self, draft: ChapterDraftRecord) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO chapter_drafts
+                 (project_id, chapter_no, title, outline, prose, guidance, target_words,
+                  mode, status, context_snapshot_json, candidate_group_id,
+                  style_packet_json, score_breakdown_json, retrieved_segment_ids_json,
+                  revision_history_json, created_at, accepted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                draft.project_id,
+                draft.chapter_no,
+                draft.title,
+                draft.outline,
+                draft.prose,
+                draft.guidance,
+                draft.target_words,
+                draft.mode,
+                draft.status,
+                json.dumps(draft.context_snapshot_json, ensure_ascii=False),
+                draft.candidate_group_id,
+                json.dumps(draft.style_packet_json, ensure_ascii=False),
+                json.dumps(draft.score_breakdown_json, ensure_ascii=False),
+                json.dumps(draft.retrieved_segment_ids_json, ensure_ascii=False),
+                json.dumps(draft.revision_history_json, ensure_ascii=False),
+                draft.created_at,
+                draft.accepted_at,
+            ),
+        )
+        self._commit()
+        return int(cur.lastrowid)
+
+    def update_chapter_draft_status(self, draft_id: int, status: str, accepted_at: str = "") -> None:
+        self.conn.execute(
+            "UPDATE chapter_drafts SET status=?, accepted_at=? WHERE id=?",
+            (status, accepted_at, draft_id),
+        )
+        self._commit()
+
+    def update_chapter_draft_snapshot(self, draft_id: int, snapshot: dict[str, Any]) -> None:
+        self.conn.execute(
+            "UPDATE chapter_drafts SET context_snapshot_json=? WHERE id=?",
+            (json.dumps(snapshot or {}, ensure_ascii=False), draft_id),
+        )
+        self._commit()
+
+    def get_chapter_draft(self, draft_id: int) -> ChapterDraftRecord | None:
+        row = self.conn.execute("SELECT * FROM chapter_drafts WHERE id=?", (draft_id,)).fetchone()
+        return _row_to_chapter_draft_record(row) if row else None
+
+    def list_chapter_drafts(self, status: str | None = None) -> list[ChapterDraftRecord]:
+        if status is None:
+            rows = self.conn.execute("SELECT * FROM chapter_drafts ORDER BY id DESC").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM chapter_drafts WHERE status=? ORDER BY id DESC", (status,)
+            ).fetchall()
+        return [_row_to_chapter_draft_record(r) for r in rows]
+
+    def list_visible_chapter_drafts(self) -> list[ChapterDraftRecord]:
+        """Hide obsolete blocked/rejected history once that chapter is accepted."""
+        rows = self.conn.execute(
+            """
+            SELECT draft.*
+              FROM chapter_drafts AS draft
+             WHERE NOT (
+                 draft.status IN ('blocked', 'rejected', 'rejected_invalid_scope')
+                 AND EXISTS (
+                     SELECT 1
+                       FROM accepted_chapters AS accepted
+                      WHERE accepted.chapter_no = draft.chapter_no
+                 )
+             )
+             ORDER BY draft.id DESC
+            """
+        ).fetchall()
+        return [_row_to_chapter_draft_record(r) for r in rows]
+
+    def insert_accepted_chapter(self, chapter: AcceptedChapterRecord) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO accepted_chapters
+                 (project_id, draft_id, chapter_no, title, prose, summary, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (chapter.project_id, chapter.draft_id, chapter.chapter_no,
+             chapter.title, chapter.prose, chapter.summary, chapter.created_at),
+        )
+        self._commit()
+        return int(cur.lastrowid)
+
+    def list_accepted_chapters(self) -> list[AcceptedChapterRecord]:
+        rows = self.conn.execute("SELECT * FROM accepted_chapters ORDER BY chapter_no, id").fetchall()
+        return [_row_to_accepted_chapter_record(r) for r in rows]
+
+    def latest_accepted_chapter(self) -> AcceptedChapterRecord | None:
+        row = self.conn.execute(
+            "SELECT * FROM accepted_chapters ORDER BY chapter_no DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return _row_to_accepted_chapter_record(row) if row else None
+
+
+# ---------- row 鈫?dataclass 杈呭姪 ----------
 def _row_to_card(r) -> CharacterCard:
     return CharacterCard(
         card_id=r["card_id"], agent_id=r["agent_id"], tier=r["tier"], slot_key=r["slot_key"],
@@ -1694,6 +3070,13 @@ def _row_to_card(r) -> CharacterCard:
         social_role=(r["social_role"] if "social_role" in r.keys() else ""),
         psychology=(r["psychology"] if "psychology" in r.keys() else ""),
         created_at=r["created_at"],
+        foreshadow_from=(r["foreshadow_from"] if "foreshadow_from" in r.keys() else 0),
+        reveal_chapter=(r["reveal_chapter"] if "reveal_chapter" in r.keys() else 0),
+        secret_reveal_chapter=(
+            r["secret_reveal_chapter"] if "secret_reveal_chapter" in r.keys() else 0
+        ),
+        foreshadow_hint=(r["foreshadow_hint"] if "foreshadow_hint" in r.keys() else ""),
+        secret_truth=(r["secret_truth"] if "secret_truth" in r.keys() else ""),
     )
 
 
@@ -1704,6 +3087,8 @@ def _row_to_part(r) -> Part:
         title=r["title"],
         goal=r["goal"],
         region=r["region"],
+        key_twist=(r["key_twist"] if "key_twist" in r.keys() else ""),
+        new_crisis_hook=(r["new_crisis_hook"] if "new_crisis_hook" in r.keys() else ""),
         reveal_node_ids=json.loads(r["reveal_node_ids"]),
         status=r["status"],
     )
@@ -1737,6 +3122,15 @@ def _row_to_chapter_plan(r) -> ChapterPlan:
         beat_goals=json.loads(r["beat_goals"]),
         beat_povs=(json.loads(r["beat_povs"]) if "beat_povs" in r.keys() and r["beat_povs"] else []),
         reveal_gate=json.loads(r["reveal_gate"]),
+        must_happen=(json.loads(r["must_happen"]) if "must_happen" in r.keys() and r["must_happen"] else []),
+        required_exit_state=(r["required_exit_state"] if "required_exit_state" in r.keys() else ""),
+        scene_flow=(json.loads(r["scene_flow"]) if "scene_flow" in r.keys() and r["scene_flow"] else []),
+        allowed_entity_ids=(json.loads(r["allowed_entity_ids"]) if "allowed_entity_ids" in r.keys() and r["allowed_entity_ids"] else []),
+        allowed_fact_ids=(json.loads(r["allowed_fact_ids"]) if "allowed_fact_ids" in r.keys() and r["allowed_fact_ids"] else []),
+        forbidden=(json.loads(r["forbidden"]) if "forbidden" in r.keys() and r["forbidden"] else []),
+        item_sources=(json.loads(r["item_sources"]) if "item_sources" in r.keys() and r["item_sources"] else {}),
+        package_version=(r["package_version"] if "package_version" in r.keys() else 1),
+        thread_decisions_json=(json.loads(r["thread_decisions_json"]) if "thread_decisions_json" in r.keys() and r["thread_decisions_json"] else []),
         knowledge_delta=json.loads(r["knowledge_delta"]),
         summary=r["summary"],
         scene_ids=json.loads(r["scene_ids"]),
@@ -1753,6 +3147,7 @@ def _row_to_chapter_plan(r) -> ChapterPlan:
         exit_state=(r["exit_state"] if "exit_state" in r.keys() else ""),
         audited=(r["audited"] if "audited" in r.keys() else 0),
         conflict_type=(r["conflict_type"] if "conflict_type" in r.keys() else ""),
+        time_hint=(r["time_hint"] if "time_hint" in r.keys() and r["time_hint"] else ""),
         status=r["status"],
     )
 
@@ -1775,6 +3170,19 @@ def _row_to_character_log(r) -> CharacterChapterLog:
         psychology=r["psychology"],
         intention=r["intention"],
         items_changed=json.loads(r["items_changed"] or "[]"),
+    )
+
+
+def _row_to_scene_anchor(r) -> SceneAnchor:
+    return SceneAnchor(
+        scene_id=r["scene_id"],
+        name=r["name"],
+        kind=r["kind"],
+        location_id=r["location_id"],
+        canonical_facts=json.loads(r["canonical_facts"] or "[]"),
+        aliases=json.loads(r["aliases"] or "[]"),
+        established_chapter=r["established_chapter"],
+        created_at=r["created_at"],
     )
 
 
@@ -1802,6 +3210,13 @@ def _row_to_location(r) -> Location:
         culture_local=r["culture_local"] if "culture_local" in keys else "",
         summary=r["summary"] if "summary" in keys else "",
         detail=r["detail"] if "detail" in keys else "",
+        foreshadow_from=r["foreshadow_from"] if "foreshadow_from" in keys else 0,
+        reveal_chapter=r["reveal_chapter"] if "reveal_chapter" in keys else 0,
+        secret_reveal_chapter=(
+            r["secret_reveal_chapter"] if "secret_reveal_chapter" in keys else 0
+        ),
+        foreshadow_hint=r["foreshadow_hint"] if "foreshadow_hint" in keys else "",
+        secret_truth=r["secret_truth"] if "secret_truth" in keys else "",
     )
 
 
@@ -1817,6 +3232,7 @@ def _row_to_edge(r) -> GraphEdge:
 
 
 def _row_to_faction(r) -> Faction:
+    keys = r.keys() if hasattr(r, "keys") else []
     return Faction(
         faction_id=r["faction_id"],
         name=r["name"],
@@ -1833,6 +3249,13 @@ def _row_to_faction(r) -> Faction:
         detail=r["detail"],
         source=r["source"],
         created_at=r["created_at"],
+        foreshadow_from=r["foreshadow_from"] if "foreshadow_from" in keys else 0,
+        reveal_chapter=r["reveal_chapter"] if "reveal_chapter" in keys else 0,
+        secret_reveal_chapter=(
+            r["secret_reveal_chapter"] if "secret_reveal_chapter" in keys else 0
+        ),
+        foreshadow_hint=r["foreshadow_hint"] if "foreshadow_hint" in keys else "",
+        secret_truth=r["secret_truth"] if "secret_truth" in keys else "",
     )
 
 
@@ -1896,4 +3319,295 @@ def _row_to_event(r) -> Event:
         location_id=r["location_id"],
         perceivers=json.loads(r["perceivers"]),
         beat_id=r["beat_id"],
+        story_clock=(r["story_clock"] if "story_clock" in r.keys() and r["story_clock"] is not None else None),
+    )
+
+
+def _row_to_source_document(r) -> SourceDocument:
+    return SourceDocument(
+        id=r["id"],
+        project_id=r["project_id"],
+        filename=r["filename"],
+        format=r["format"],
+        raw_text=r["raw_text"],
+        created_at=r["created_at"],
+    )
+
+
+def _row_to_source_chapter(r) -> SourceChapter:
+    return SourceChapter(
+        id=r["id"],
+        project_id=r["project_id"],
+        source_document_id=r["source_document_id"],
+        chapter_no=r["chapter_no"],
+        title=r["title"],
+        text=r["text"],
+        word_count=r["word_count"],
+        summary=r["summary"],
+        created_at=r["created_at"],
+    )
+
+
+def _row_to_source_chunk(r) -> SourceChunk:
+    return SourceChunk(
+        id=r["id"],
+        project_id=r["project_id"],
+        chapter_id=r["chapter_id"],
+        chunk_no=r["chunk_no"],
+        text=r["text"],
+        summary=r["summary"],
+        embedding_key=r["embedding_key"],
+    )
+
+
+def _row_to_style_segment(r) -> StyleSegment:
+    return StyleSegment(
+        id=r["id"],
+        project_id=r["project_id"],
+        source_chapter_id=r["source_chapter_id"],
+        start_offset=r["start_offset"],
+        end_offset=r["end_offset"],
+        text=r["text"],
+        voice_type=r["voice_type"],
+        character_id=r["character_id"],
+        pov_character_id=r["pov_character_id"],
+        discourse_type=r["discourse_type"],
+        scene_type=r["scene_type"],
+        emotion_json=json.loads(r["emotion_json"] or "[]"),
+        register_type=r["register_type"],
+        feature_json=json.loads(r["feature_json"] or "{}"),
+        embedding_key=r["embedding_key"],
+        quality_score=r["quality_score"],
+        annotation_confidence=r["annotation_confidence"],
+        enabled=bool(r["enabled"]),
+    )
+
+
+def _row_to_style_cluster(r) -> StyleCluster:
+    return StyleCluster(
+        id=r["id"],
+        project_id=r["project_id"],
+        cluster_type=r["cluster_type"],
+        label=r["label"],
+        centroid_key=r["centroid_key"],
+        feature_summary_json=json.loads(r["feature_summary_json"] or "{}"),
+        representative_segment_ids_json=json.loads(r["representative_segment_ids_json"] or "[]"),
+    )
+
+
+def _row_to_style_negative_sample(r) -> StyleNegativeSample:
+    return StyleNegativeSample(
+        id=r["id"],
+        project_id=r["project_id"],
+        text=r["text"],
+        failure_types_json=json.loads(r["failure_types_json"] or "[]"),
+        related_source_segment_ids_json=json.loads(r["related_source_segment_ids_json"] or "[]"),
+        score_json=json.loads(r["score_json"] or "{}"),
+        created_at=r["created_at"],
+    )
+
+
+def _row_to_author_experience_source(r) -> AuthorExperienceSource:
+    return AuthorExperienceSource(
+        source_id=r["source_id"],
+        project_id=r["project_id"],
+        label=r["label"],
+        source_type=r["source_type"],
+        path=r["path"],
+        content_hash=r["content_hash"],
+        enabled=bool(r["enabled"]),
+        created_at=r["created_at"],
+    )
+
+
+def _row_to_author_experience_fragment(r) -> AuthorExperienceFragment:
+    return AuthorExperienceFragment(
+        fragment_id=r["fragment_id"],
+        project_id=r["project_id"],
+        source_id=r["source_id"],
+        fragment_index=r["fragment_index"],
+        title_hint=r["title_hint"],
+        text=r["text"],
+        tags_json=json.loads(r["tags_json"] or "[]"),
+        emotion_json=json.loads(r["emotion_json"] or "[]"),
+        self_schema_json=json.loads(r["self_schema_json"] or "{}"),
+        confidence=float(r["confidence"] or 0.0),
+    )
+
+
+def _row_to_author_life_model(r) -> AuthorLifeModel:
+    return AuthorLifeModel(
+        model_id=r["model_id"],
+        project_id=r["project_id"],
+        source_ids_json=json.loads(r["source_ids_json"] or "[]"),
+        source_label=r["source_label"],
+        summary=r["summary"],
+        core_wound_json=json.loads(r["core_wound_json"] or "{}"),
+        defense_patterns_json=json.loads(r["defense_patterns_json"] or "[]"),
+        desire_vectors_json=json.loads(r["desire_vectors_json"] or "[]"),
+        relationship_model_json=json.loads(r["relationship_model_json"] or "{}"),
+        narrative_engines_json=json.loads(r["narrative_engines_json"] or "[]"),
+        prose_rules_json=json.loads(r["prose_rules_json"] or "{}"),
+        worldview_json=json.loads(r["worldview_json"] or "{}"),
+        evidence_json=json.loads(r["evidence_json"] or "[]"),
+        confidence_json=json.loads(r["confidence_json"] or "{}"),
+        persona_prompt=r["persona_prompt"],
+        created_at=r["created_at"],
+    )
+
+
+def _row_to_naming_profile(r) -> NamingProfile:
+    payload = json.loads(r["profile_json"] or "{}")
+    return NamingProfile(
+        profile_id=r["profile_id"],
+        scope=payload.get("scope", r["scope"]),
+        label=payload.get("label", r["label"]),
+        genre=payload.get("genre", ""),
+        culture_source=payload.get("culture_source", "zh"),
+        phonology_style=payload.get("phonology_style", "clean_han"),
+        primary_length_min=payload.get("primary_length_min", 2),
+        primary_length_max=payload.get("primary_length_max", 4),
+        allow_surname=bool(payload.get("allow_surname", True)),
+        allow_compound_given_name=bool(payload.get("allow_compound_given_name", False)),
+        allow_middle_dot=bool(payload.get("allow_middle_dot", False)),
+        allow_hyphen=bool(payload.get("allow_hyphen", False)),
+        allow_space=bool(payload.get("allow_space", False)),
+        nickname_rules=payload.get("nickname_rules", {}) or {},
+        honorific_rules=payload.get("honorific_rules", {}) or {},
+        faction_variance_policy=payload.get("faction_variance_policy", {}) or {},
+        rare_structure_quota=payload.get("rare_structure_quota", {}) or {},
+        motif_token_budget=payload.get("motif_token_budget", {}) or {},
+        banned_tokens=payload.get("banned_tokens", []) or [],
+        danger_tokens=payload.get("danger_tokens", []) or [],
+        stopwords_for_primary=payload.get("stopwords_for_primary", []) or [],
+        version=r["active_version"],
+    )
+
+
+def _row_to_culture_naming_style(r) -> CultureNamingStyle:
+    payload = json.loads(r["style_json"] or "{}")
+    return CultureNamingStyle(
+        style_id=r["style_id"],
+        profile_id=r["profile_id"],
+        culture_id=r["culture_id"],
+        culture_name=r["culture_name"],
+        parent_style_id=payload.get("parent_style_id"),
+        surname_pool=payload.get("surname_pool", []) or [],
+        given_name_pool=payload.get("given_name_pool", []) or [],
+        title_pool=payload.get("title_pool", []) or [],
+        morphology_templates=payload.get("morphology_templates", []) or [],
+        disallowed_templates=payload.get("disallowed_templates", []) or [],
+        nickname_patterns=payload.get("nickname_patterns", []) or [],
+        honorific_patterns=payload.get("honorific_patterns", []) or [],
+        enemy_label_patterns=payload.get("enemy_label_patterns", []) or [],
+        symbol_policy=payload.get("symbol_policy", {}) or {},
+        style_fingerprint=json.loads(r["fingerprint_json"] or "{}"),
+    )
+
+
+def _row_to_character_name(r) -> CharacterNameRecord:
+    return CharacterNameRecord(
+        agent_id=r["agent_id"],
+        profile_id=r["profile_id"],
+        culture_style_id=r["culture_style_id"],
+        primary_name=r["primary_name"],
+        short_name=r["short_name"],
+        nickname=r["nickname"],
+        honorific=r["honorific"],
+        public_alias=r["public_alias"],
+        self_ref=r["self_ref"],
+        enemy_label=r["enemy_label"],
+        display_name_locked=r["display_name_locked"],
+        primary_name_normalized=r["normalized_name"],
+        name_parts_json=json.loads(r["name_parts_json"] or "{}"),
+        source=r["source"],
+        status=r["status"],
+        replaced_by_agent_id=r["replaced_by_agent_id"],
+        audit_flags=json.loads(r["audit_flags_json"] or "[]"),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+    )
+
+
+def _row_to_story_bible_record(r) -> StoryBibleRecord:
+    return StoryBibleRecord(
+        project_id=r["project_id"],
+        source_type=r["source_type"],
+        title_style_json=json.loads(r["title_style_json"] or "{}"),
+        world_config_json=json.loads(r["world_config_json"] or "{}"),
+        characters_json=json.loads(r["characters_json"] or "[]"),
+        locations_json=json.loads(r["locations_json"] or "[]"),
+        factions_json=json.loads(r["factions_json"] or "[]"),
+        items_json=json.loads(r["items_json"] or "[]"),
+        relationships_json=json.loads(r["relationships_json"] or "[]"),
+        timeline_json=json.loads(r["timeline_json"] or "[]"),
+        open_threads_json=json.loads(r["open_threads_json"] or "[]"),
+        last_state_json=json.loads(r["last_state_json"] or "{}"),
+        narrative_constraints_json=json.loads(r["narrative_constraints_json"] or "{}"),
+        style_profile_id=r["style_profile_id"],
+        updated_at=r["updated_at"],
+    )
+
+
+def _row_to_continuation_job(r) -> ContinuationJobRecord:
+    return ContinuationJobRecord(
+        id=r["id"],
+        project_id=r["project_id"],
+        phase=r["phase"],
+        progress=r["progress"],
+        total=r["total"],
+        status=r["status"],
+        error=r["error"],
+        config_json=json.loads(r["config_json"] or "{}"),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+    )
+
+
+def _row_to_writing_settings(r) -> WritingSettings:
+    return WritingSettings(
+        project_id=r["project_id"],
+        target_words=r["target_words"],
+        min_words=r["min_words"],
+        max_words=r["max_words"],
+        outline_first=bool(r["outline_first"]),
+        auto_chapter_count=r["auto_chapter_count"],
+        require_human_acceptance=bool(r["require_human_acceptance"]) if "require_human_acceptance" in r.keys() else True,
+        style_profile_id=r["style_profile_id"],
+    )
+
+
+def _row_to_chapter_draft_record(r) -> ChapterDraftRecord:
+    return ChapterDraftRecord(
+        id=r["id"],
+        project_id=r["project_id"],
+        chapter_no=r["chapter_no"],
+        title=r["title"],
+        outline=r["outline"],
+        prose=r["prose"],
+        guidance=r["guidance"],
+        target_words=r["target_words"],
+        mode=r["mode"],
+        status=r["status"],
+        context_snapshot_json=json.loads(r["context_snapshot_json"] or "{}"),
+        candidate_group_id=(r["candidate_group_id"] if "candidate_group_id" in r.keys() else ""),
+        style_packet_json=json.loads(r["style_packet_json"] or "{}") if "style_packet_json" in r.keys() else {},
+        score_breakdown_json=json.loads(r["score_breakdown_json"] or "{}") if "score_breakdown_json" in r.keys() else {},
+        retrieved_segment_ids_json=json.loads(r["retrieved_segment_ids_json"] or "[]") if "retrieved_segment_ids_json" in r.keys() else [],
+        revision_history_json=json.loads(r["revision_history_json"] or "[]") if "revision_history_json" in r.keys() else [],
+        created_at=r["created_at"],
+        accepted_at=r["accepted_at"],
+    )
+
+
+def _row_to_accepted_chapter_record(r) -> AcceptedChapterRecord:
+    return AcceptedChapterRecord(
+        id=r["id"],
+        project_id=r["project_id"],
+        draft_id=r["draft_id"],
+        chapter_no=r["chapter_no"],
+        title=r["title"],
+        prose=r["prose"],
+        summary=r["summary"],
+        created_at=r["created_at"],
     )

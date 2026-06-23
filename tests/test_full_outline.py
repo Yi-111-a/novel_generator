@@ -21,7 +21,7 @@ def _seed_repo() -> Repository:
 
 def test_build_full_outline_generates_all_chapters():
     r = _seed_repo()
-    p = Planner(r, llm=None, theme="证道")
+    p = Planner(r, llm=None, theme="证道", story_scale="short")
     p.build_master(part_count=3, arcs_per_part=2)
     info = p.build_full_outline()
     arcs = r.list_arcs()

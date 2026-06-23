@@ -46,7 +46,7 @@ class Engine:
         self.max_retries = max_retries
         # §3.3 出戏检测（可选）：动作明显违背本性且无外因 → 重抽一次；离线/无则跳过。
         self.consistency = consistency
-        # 默认 propagator 只做直接感知（无扭曲）；多角色二手扭曲由 Director 显式调用
+        # 默认 propagator 只做直接感知（无扭曲）；多角色二手扭曲可由上层显式调用
         from .propagation import Propagator
 
         self.propagator = propagator or Propagator(repo)
@@ -127,7 +127,7 @@ class Engine:
         event_id = f"ev_{uuid.uuid4().hex[:8]}"
         fact_id = f"f_{uuid.uuid4().hex[:8]}"
 
-        # 默认仅行动者感知；Director 可传入在场的多个角色
+        # 默认仅行动者感知；上层可传入在场的多个角色
         perceivers = list(dict.fromkeys((perceivers or [agent_id]) + [agent_id]))
 
         ev = Event(
@@ -161,7 +161,7 @@ class Engine:
         )
         self.repo.append_fact(fact)
 
-        # 直接感知：在场者拿到 canonical 版本（无扭曲）。二手转述的扭曲由 Director 调 propagator.tell
+        # 直接感知：在场者拿到 canonical 版本（无扭曲）。二手转述的扭曲可通过 propagator.tell 处理
         self.propagator.perceive(fact_id, content, perceivers, self._tick, event_id)
         return event_id, fact_id
 
