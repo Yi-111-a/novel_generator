@@ -3,10 +3,25 @@ from __future__ import annotations
 
 from novel_engine import db
 from novel_engine.agent import CharacterAgent
-from novel_engine.casting import cast_or_get, ensure_cards_for_personas
+from novel_engine.casting import cast_or_get, ensure_cards_for_personas, enrich_character_cards
+from novel_engine.llm.base import LLMClient
 from novel_engine.llm.mock import MockClient
 from novel_engine.models import Entity, Persona
 from novel_engine.repository import Repository
+
+
+class _Cap(LLMClient):
+    """记录所有 (system, user) 调用，用于校验 KV-cache 前缀稳定性。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def complete(self, s, u):
+        return self.complete_at(s, u)
+
+    def complete_at(self, s, u, temperature=None):
+        self.calls.append((s, u))
+        return "{}"
 
 
 def _repo() -> Repository:
@@ -32,6 +47,23 @@ def test_motif_lands_in_inventory():
                                     '"motif_objects":["黑漆木匣"]}']))
     assert "黑漆木匣" in c.motif_objects
     assert r.agent_holds(c.agent_id, "黑漆木匣")
+
+
+def test_enrich_card_system_prefix_stable_across_characters():
+    """KV-cache 不变量：人物卡加厚时，system 不含角色名 → 同 tier 的多个角色
+    共享逐字节一致的 system 前缀，命中 DeepSeek 自动前缀缓存。角色名只在 user 里。"""
+    r = _repo()
+    r.add_bible_section("settingCore", "设定内核", "一个门派林立的江湖世界。")
+    for slot, name in (("lead_a", "云鹤子"), ("lead_b", "季拾遗")):
+        cast_or_get(r, slot, tier="lead",
+                    llm=MockClient([f'{{"name":"{name}","one_liner":"x","defining_trait":"y"}}']))
+    cap = _Cap()
+    enrich_character_cards(r, llm=cap)
+    lead_systems = [s for s, _ in cap.calls if "主角极详" in s]
+    assert len(lead_systems) >= 2                       # 两个主角都加厚了
+    assert len(set(lead_systems)) == 1                  # system 跨角色逐字节一致
+    assert all("云鹤子" not in s and "季拾遗" not in s for s in lead_systems)  # 角色名不在 system
+    assert any("云鹤子" in u for _, u in cap.calls)     # 角色名在 user
 
 
 def test_ensure_cards_for_personas_tiers():

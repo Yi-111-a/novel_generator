@@ -222,8 +222,9 @@ def enrich_character_cards(repo: Repository, llm: LLMClient | None = None,
         if p:
             persona_brief = (f"欲望：{p.want}\n弱点：{p.fatal_flaw}\n说话方式：{p.voice}\n"
                              f"珍视：{'、'.join(v.get('name','') for v in (p.values or []))[:80]}")
+        # system 不含角色名（角色名在 user 里给）→ 全体 lead 调用共享同一前缀，命中 KV-cache。
         sys = (
-            f"你是小说人物设定师。【任务：主角极详】角色「{c.name}」(lead)。给 JSON 五段："
+            f"你是小说人物设定师。【任务：主角极详】(lead) 为给定角色写 JSON 五段："
             f"appearance(生理：外貌/身材/年龄/标志物，≥80字){tone_hint}、"
             "social_role(社会：出身/家庭/阶层/隶属势力/社会关系网，≥80字)、"
             "psychology(心理：性格/三观/恐惧/欲望细化，≥80字)、"
@@ -248,8 +249,9 @@ def enrich_character_cards(repo: Repository, llm: LLMClient | None = None,
     lead_blob = "\n".join(f"· {c.name}：{c.one_liner or c.defining_trait}" for c in cards if c.tier == "lead")
     for c in supports:
         fac_name = _ent_faction(c.agent_id) or c.key_relation
+        # system 不含角色名（角色名在 user 里给）→ 全体 supporting 调用共享同一前缀，命中 KV-cache。
         sys = (
-            f"你是小说人物设定师。【任务：主配加厚】角色「{c.name}」(supporting)。给 JSON 五段："
+            f"你是小说人物设定师。【任务：主配加厚】(supporting) 为给定角色写 JSON 五段："
             f"appearance(30-80字){tone_hint}、social_role(30-80字)、psychology(30-80字)、"
             "backstory(60-120字)、arc(1句)。"
             "**严格符合世界观与势力，不得编造与设定冲突的细节；与主角差异化**。只输出 JSON。"

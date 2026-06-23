@@ -25,3 +25,16 @@ DeepSeek 自动前缀缓存每次都从该处失效、后面的固定规则反�
 DeepSeek 前缀缓存是**账号级、跨请求持续数小时**，所以两次对照跑的「累计命中率」
 会互相污染，不能直接对比。干净、无污染的信号是**单个新场景调用里 system 前缀的命中**：
 改后一次新调用即命中 ~2688 token，改前为 0。命中部分计费约 1/10、并降低首字延迟（TTFT）。
+
+## 推广到其它调用点
+同一手法（system 只放稳定内容，变量进 user）扫了全部 LLM 调用点：
+
+| 调用点 | 状态 | 处理 |
+|---|---|---|
+| `narration/scene_writer`（正文，最热） | 旧版 system 夹动态 RAG → 已修 | 见上，实测 |
+| `casting.enrich_character_cards`（逐角色加厚） | 旧版 system 含角色名 → 已修 | 角色名移入 user；同 tier 角色共享前缀。回归测试 `test_enrich_card_system_prefix_stable_across_characters` |
+| `narration/audit._llm_audit`（逐章审计） | system 本就是常量 | 已是最优，无需改 |
+| `narration/controller`、`narration/fact_delta`、`narration/batch_audit` | system 本就是常量 | 已是最优，无需改 |
+
+结论：热点路径只有 scene_writer 与 casting 把变量塞进了 system；两处已修，其余本就正确。
+每处都用「system 跨调用逐字节一致」的回归测试钉死，防止以后再把变量写回 system。
