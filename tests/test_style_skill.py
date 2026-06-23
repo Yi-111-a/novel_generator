@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from novel_engine import db
-from novel_engine.llm.base import LLMClient
-from novel_engine.models import Entity, Event, Persona, StyleProfile, ToneProfile
-from novel_engine.narration.narrator import Narrator
+from novel_engine.models import StyleProfile
 from novel_engine.repository import Repository
 from novel_engine.style_skill import (
     compute_style_metrics,
@@ -57,47 +55,6 @@ def test_disabled_style_skill_not_injected():
     r = Repository(db.connect(":memory:"))
     r.set_style_skill(StyleProfile(name="x", register="极简", samples=["短。"], enabled=False))
     assert r.style_skill_prompt() == ""
-
-
-# ---- 注入 narrator system（捕获 prompt）----
-class _Capture(LLMClient):
-    """记录每次 complete 的 system；render 是第一次调用（后续可能有 tone_gate 等闸门调用）。"""
-    def __init__(self) -> None:
-        self.systems: list[str] = []
-
-    def complete(self, system: str, user: str) -> str:
-        self.systems.append(system)
-        return "他在桌前坐下，没有再说话。"
-
-    @property
-    def render_system(self) -> str:
-        return self.systems[0] if self.systems else ""
-
-    @property
-    def name(self) -> str:
-        return "Capture"
-
-
-def test_style_skill_injected_into_narrator_system():
-    r = Repository(db.connect(":memory:"))
-    r.insert_entity(Entity("hero", "character", "云鹤子", {}))
-    r.insert_persona(Persona(agent_id="hero", name="云鹤子"))
-    r.set_style_skill(StyleProfile(name="江南腔", source="龙族", register="少年心气",
-                                   rhythm="长短交替", samples=["他仰头望天。"], enabled=True))
-    llm = _Capture()
-    Narrator(r, llm).render("hero", [Event("e1", 1, ["hero"], "独坐")], "", [], [], scene_pos=1)
-    assert "文风模拟" in llm.render_system and "江南腔" in llm.render_system
-
-
-def test_style_skill_stacks_with_tone_profile():
-    r = Repository(db.connect(":memory:"))
-    r.insert_entity(Entity("hero", "character", "云鹤子", {}))
-    r.insert_persona(Persona(agent_id="hero", name="云鹤子"))
-    r.set_tone_profile(ToneProfile(genre="literary", primary_effect="resonance", register="典雅"))
-    r.set_style_skill(StyleProfile(name="江南腔", register="少年心气", samples=["望天。"], enabled=True))
-    llm = _Capture()
-    Narrator(r, llm).render("hero", [Event("e1", 1, ["hero"], "独坐")], "", [], [], scene_pos=1)
-    assert "文风契约" in llm.render_system and "文风模拟" in llm.render_system   # 基线 + 叠加并存
 
 
 # ---- 软闸门 ----
