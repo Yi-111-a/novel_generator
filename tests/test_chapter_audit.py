@@ -3,9 +3,31 @@ from __future__ import annotations
 
 from novel_engine import db
 from novel_engine.llm.base import LLMClient
-from novel_engine.models import ChapterPlan, Entity, Scene
-from novel_engine.narration.audit import audit_chapter, _phantom_items
+from novel_engine.models import AcceptedChapterRecord, ChapterPlan, Entity, Scene
+from novel_engine.narration.audit import (
+    audit_chapter,
+    audit_chapter_result,
+    run_combined_chapter_audit,
+    _phantom_items,
+)
 from novel_engine.repository import Repository
+
+
+def test_repeated_opening_flagged_as_p1_advisory():
+    """跨章复述开头：报 repeated_opening，但只是 P1 提示，不阻断、不交 Reviser。"""
+    r = Repository(db.connect(":memory:"))
+    shared = "六月的临江市像个蒸笼，陈野坐在写字楼的奶茶店里，面前一杯喝到底的杨枝甘露，人事部的消息措辞礼貌。"
+    r.insert_accepted_chapter(AcceptedChapterRecord(
+        project_id="p", draft_id=1, chapter_no=1,
+        prose=shared + "他端着纸箱离开了办公楼。", summary="", created_at="",
+    ))
+    ch2 = ChapterPlan(chapter_id="c2", arc_id="a", sequence_order=2, title="第二章")
+    prose = shared + "但此刻他已经在老城区的店铺里，对着一台不该亮的电脑。"
+    result = run_combined_chapter_audit(r, ch2, prose, None, llm=None)
+
+    repeated = [v for v in result.violations if v["type"] == "repeated_opening"]
+    assert repeated and repeated[0]["severity"] == "P1"
+    assert result.decision == "accept"  # P1 不阻断
 
 
 def _repo() -> Repository:
@@ -65,3 +87,18 @@ def test_llm_pass_clean():
               prose_text="他拧开钢笔写字。")
     ok, fb = audit_chapter(r, ch, [s], None, llm=_PassLLM())
     assert ok is True
+
+
+def test_bug_signal_fails_structured_audit():
+    r = _repo()
+    ch = _ch()
+    s = Scene(
+        scene_id="s1",
+        discourse_order=1,
+        source_events=[],
+        pov="hero",
+        prose_text="只输出 JSON。fac_shadow 站在门后，钢笔落在地上。",
+    )
+    result = audit_chapter_result(r, ch, [s], None, llm=None)
+    assert result.ok is False
+    assert result.checks["bug_signals"].ok is False

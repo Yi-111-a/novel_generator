@@ -1,4 +1,4 @@
-"""§13.1 道具台账：items_present 继承前章未消耗 + cast 携带；items_introduced 须有来源；持久化。"""
+"""§13.1 道具台账：只允许节拍点名或前章实际继承的道具。"""
 from __future__ import annotations
 
 from novel_engine import db
@@ -22,15 +22,15 @@ def _seed_repo() -> Repository:
     return r
 
 
-def test_items_present_includes_cast_holdings_and_persists():
+def test_cast_motif_holdings_are_candidates_not_automatic_scene_items():
     r = _seed_repo()
     p = Planner(r, llm=None, theme="证道")
     p.build_master(part_count=3, arcs_per_part=1)
     ch = p.next_chapter()
-    # cast 携带的道具必在 items_present
+    # motif/inventory 只是候选池；当前 beat 没点名就不得自动入场。
     for aid in ch.cast:
         for it in r.items_held_by(aid):
-            assert it.object_id in ch.items_present
+            assert it.object_id not in ch.items_present
     # 持久化往返一致
     again = r.get_chapter_plan(ch.chapter_id)
     assert again.items_present == ch.items_present
@@ -75,7 +75,8 @@ def test_items_present_does_not_carry_destroyed_or_sacrificed_items():
     p = Planner(r, llm=None, theme="证道")
     p.build_master(part_count=3, arcs_per_part=1)
     c1 = p.next_chapter()
-    doomed = c1.items_present[0]
+    doomed = r.items_held_by("hero")[0].object_id
+    c1.items_present = [doomed]
     r.transfer_item(doomed, None, c1.sequence_order, status="sacrificed", note="used up")
     c1.status = "done"
     r.upsert_chapter_plan(c1)
