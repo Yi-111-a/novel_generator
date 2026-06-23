@@ -49,13 +49,23 @@ Python 引擎 · FastAPI 服务 · React 创作工坊 · MCP 工具层 · 后端
 4. **工程素质**:~420 单元测试全过;提交按子系统拆分;对检测器的诚实边界有明确标注。
 
 ### 架构
-```
-React 创作工坊 ┐        ┌ MCP 客户端(Claude Desktop / IDE)
-FastAPI 服务  ┴───┬────┴ novelworld_mcp(5 工具)
-              novel_engine(Python 引擎)
-  Context:世界库 · 知识图谱 · 故事时钟 · RAG 检索
-  Harness:披露闸 · 范围闸 · 场景锚点 · 分级 Reviser · 命名
-              └──────── DeepSeek API ────────┘
+```mermaid
+flowchart TB
+    UI["React 创作工坊"]
+    MC["MCP 客户端<br/>Claude Desktop / IDE"]
+    API["FastAPI 服务"]
+    MCP["novelworld_mcp<br/>5 个只读工具"]
+    UI --> API
+    MC --> MCP
+    subgraph ENG["novel_engine · Python 引擎"]
+        direction TB
+        CTX["<b>Context 层</b><br/>世界库 · 知识图谱<br/>故事时钟 · RAG 检索"]
+        HAR["<b>Harness 层</b><br/>披露闸 · 范围闸 · 场景锚点<br/>分级 Reviser · 命名"]
+        CTX --> HAR
+    end
+    API --> ENG
+    MCP --> ENG
+    ENG --> LLM[("DeepSeek API")]
 ```
 
 ### 快速开始
@@ -125,13 +135,23 @@ Long-form generation breaks not on prose quality but on **structural continuity*
 4. **Engineering quality**: ~420 unit tests passing; commits split by subsystem; detector limits documented honestly.
 
 ### Architecture
-```
-React studio ┐        ┌ MCP client (Claude Desktop / IDE)
-FastAPI svc  ┴───┬────┴ novelworld_mcp (5 tools)
-            novel_engine (Python)
-  Context: world DB · knowledge graph · story clock · RAG
-  Harness: disclosure · scope · scene anchors · Reviser · naming
-            └──────── DeepSeek API ────────┘
+```mermaid
+flowchart TB
+    UI["React studio"]
+    MC["MCP client<br/>Claude Desktop / IDE"]
+    API["FastAPI service"]
+    MCP["novelworld_mcp<br/>5 read-only tools"]
+    UI --> API
+    MC --> MCP
+    subgraph ENG["novel_engine · Python"]
+        direction TB
+        CTX["<b>Context layer</b><br/>world DB · knowledge graph<br/>story clock · RAG retrieval"]
+        HAR["<b>Harness layer</b><br/>disclosure · scope · scene anchors<br/>graded Reviser · naming"]
+        CTX --> HAR
+    end
+    API --> ENG
+    MCP --> ENG
+    ENG --> LLM[("DeepSeek API")]
 ```
 
 ### Quick start
