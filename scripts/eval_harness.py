@@ -43,6 +43,7 @@ class Case:
     prose: str
     has_violation: bool          # ground truth
     violation_type: str = ""     # 命中的 P0 类型 (用于 Controller 重写率)
+    difficulty: str = "easy"     # easy=教科书形态 / hard=对抗规避(改写/别名/隐式/绰号)
 
 
 @dataclass
@@ -80,6 +81,12 @@ def metric_timeline() -> Metric:
     for prose in ("凌晨四点的槐荫巷44号，灯还亮着。", "三点半，他还没睡。", "凌晨两点，雨停了。"):
         r = _base_repo(); _seed_prev_clock(r)
         cases.append(Case(r, ChapterPlan("c13", "a", 13), prose, True, "story_clock_regression"))
+    # 对抗·hard：隐式时间词（无阿拉伯钟点），仍是倒流（前章 04:17 → 更早）
+    for prose in ("天还没亮，后半夜的槐荫巷一片死寂。",   # 后半夜 ≈ 02-03 点 < 04:17
+                  "掌灯时分早过了，夜更深了，他仍未合眼。",
+                  "鸡叫头遍，离天亮还早。"):              # 鸡叫头遍 ≈ 凌晨一两点
+        r = _base_repo(); _seed_prev_clock(r)
+        cases.append(Case(r, ChapterPlan("c13", "a", 13), prose, True, "story_clock_regression", "hard"))
     # 干净：时间前进 或 显式次日
     for prose in ("早上七点，校车快来了。", "次日凌晨四点，槐荫巷44号。", "傍晚六点，天暗了。"):
         r = _base_repo(); _seed_prev_clock(r)
@@ -111,6 +118,13 @@ def metric_item_revival() -> Metric:
         r = _repo_with_sacrificed_item()
         ch = ChapterPlan("c10", "a", 10, cast=["hero"], pov_agent="hero", location_ids=["loc_main"])
         cases.append(Case(r, ch, prose, True, "structural_defect"))
+    # 对抗·hard：用简称/别称/指代指向同一件已焚毁道具（规避全名匹配）
+    for prose in ("他摸出那枚罗盘，指针疯狂打转。",      # 简称「罗盘」≠ 全名「玄铁罗盘」
+                  "那枚祖传的铁罗盘又在掌心发烫。",       # 改述
+                  "他握紧焚不毁的旧物，针尖微微一颤。"):   # 纯指代
+        r = _repo_with_sacrificed_item()
+        ch = ChapterPlan("c10", "a", 10, cast=["hero"], pov_agent="hero", location_ids=["loc_main"])
+        cases.append(Case(r, ch, prose, True, "structural_defect", "hard"))
     # 干净：不提复活道具
     for prose in ("他空着手站在巷口。", "罗盘早已不在，他只能凭记忆走。", "月光照在空荡的掌心。"):
         r = _repo_with_sacrificed_item()
@@ -143,6 +157,12 @@ def metric_disclosure() -> Metric:
                   f"卷宗末尾赫然写着{secret_name}。"):
         r = _repo_with_concealed_secret()
         cases.append(Case(r, ChapterPlan("c2", "a", 2), prose, True, "future_event_leak"))
+    # 对抗·hard：不写出秘密全名，改用描述/暗示提前点破（规避全名匹配）
+    for prose in ("他忽然懂了：那座塔真正的名字，正是一切的起点。",   # 描述「黑塔真名」却不写出
+                  "她low声念出那个被封存的名讳，瞳孔骤缩。",
+                  "卷宗末尾那行字，泄露了塔最深的底。"):
+        r = _repo_with_concealed_secret()
+        cases.append(Case(r, ChapterPlan("c2", "a", 2), prose, True, "future_event_leak", "hard"))
     # 干净：不提前点破
     for prose in ("他还看不懂卷宗上的纹路。", "答案仍藏在迷雾里。", "她合上卷宗，一无所获。"):
         r = _repo_with_concealed_secret()
@@ -181,6 +201,11 @@ def metric_scope() -> Metric:
     # 对抗：未授权角色「墨渊」越权登场
     for prose in ("墨渊推门而入，盯着他。", "巷口传来墨渊的冷笑。", "墨渊的影子落在墙上。"):
         cases.append(Case(_scope_repo(), _scope_chapter(), prose, True, "unauthorized_character"))
+    # 对抗·hard：用绰号/姓氏/称谓指向同一未授权角色（规避全名匹配）
+    for prose in ("墨先生推门而入，盯着他。",        # 姓氏+称谓 ≠ 全名「墨渊」
+                  "那魔头的冷笑从巷口飘来。",          # 绰号
+                  "夺道之人立在墙影里，没有出声。"):    # 以其 want「夺道」指代
+        cases.append(Case(_scope_repo(), _scope_chapter(), prose, True, "unauthorized_character", "hard"))
     # 干净：只有授权主角
     for prose in ("云鹤子独自站在槐荫巷44号。", "他在巷子里来回踱步。", "云鹤子抬头看了看灯。"):
         cases.append(Case(_scope_repo(), _scope_chapter(), prose, False))
@@ -199,16 +224,26 @@ def metric_scope() -> Metric:
 # --------------------------------------------------------------------------- #
 # 评测执行
 # --------------------------------------------------------------------------- #
+def _recall(cases: list[Case], detect: Callable[[Case], bool]) -> tuple[int, int]:
+    return sum(1 for c in cases if detect(c)), len(cases)
+
+
 def run_metric(m: Metric) -> dict:
     adv = [c for c in m.cases if c.has_violation]
+    easy = [c for c in adv if c.difficulty == "easy"]
+    hard = [c for c in adv if c.difficulty == "hard"]
     clean = [c for c in m.cases if not c.has_violation]
-    caught = sum(1 for c in adv if m.detect(c))
+    caught, n_adv = _recall(adv, m.detect)
+    easy_c, easy_n = _recall(easy, m.detect)
+    hard_c, hard_n = _recall(hard, m.detect)
     fp = sum(1 for c in clean if m.detect(c))
-    recall = caught / len(adv) if adv else 0.0
+    recall = caught / n_adv if n_adv else 0.0
     return {
         "metric": m,
-        "n_adv": len(adv), "n_clean": len(clean),
+        "n_adv": n_adv, "n_clean": len(clean),
         "recall": recall,
+        "easy_recall": easy_c / easy_n if easy_n else 0.0, "easy_n": easy_n,
+        "hard_recall": hard_c / hard_n if hard_n else 0.0, "hard_n": hard_n,
         "baseline_residual": 1.0,            # 护栏关：对抗样本全部出库
         "current_residual": 1.0 - recall,    # 护栏开：残留 = 漏检
         "fp": fp / len(clean) if clean else 0.0,
@@ -242,20 +277,27 @@ def build_report(metrics: list[Metric]) -> str:
     out: list[str] = []
     out.append("# 离线护栏评测 (确定性, 无 LLM)")
     out.append("")
-    out.append("| 指标 | 基线(护栏关) | 当前 Harness | 召回 | 误报 | 样本(对抗/干净) |")
-    out.append("|------|------|------|------|------|------|")
+    out.append("分两档对抗样本：easy=教科书形态(检测器该抓的标准写法)；"
+               "hard=对抗规避(同义改写/别名简称/隐式时间词/绰号称谓)。")
+    out.append("")
+    out.append("| 指标 | 基线 | 当前残留 | 总召回 | easy 召回 | hard 召回 | 误报 | 对抗/干净 |")
+    out.append("|------|------|------|------|------|------|------|------|")
     for r in rows:
         m = r["metric"]
-        out.append(f"| {m.name} | {pct(r['baseline_residual'])} 残留 | "
-                   f"{pct(r['current_residual'])} 残留 | {pct(r['recall'])} | "
+        out.append(f"| {m.name} | {pct(r['baseline_residual'])} | "
+                   f"{pct(r['current_residual'])} | {pct(r['recall'])} | "
+                   f"{pct(r['easy_recall'])} ({r['easy_n']}) | "
+                   f"{pct(r['hard_recall'])} ({r['hard_n']}) | "
                    f"{pct(r['fp'])} | {r['n_adv']}/{r['n_clean']} |")
-    out.append(f"| Controller 重写率(P0 拦截占比) | {pct(base_ctrl)} | {pct(cur_ctrl)} | - | - | 全语料 |")
+    out.append(f"| Controller 重写率(P0 拦截) | {pct(base_ctrl)} | {pct(cur_ctrl)} | - | - | - | - | 全语料 |")
     out.append("")
-    out.append("说明: 「残留」= 违规最终留在正文的比例。基线=护栏关时对抗样本 100% 出库;")
-    out.append("当前 Harness 残留 = 漏检率 (1 - 召回)。误报 = 干净样本被错误拦下的比例。")
-    out.append("Controller 重写率 = 被判 P0 而路由到 Reviser 的草稿占比 (基线无此拦截 = 0%)。")
+    out.append("说明：「残留」= 违规最终留在正文的比例 = 漏检率(1-总召回)。基线=护栏关时对抗样本 100% 出库。")
+    out.append("误报 = 干净样本被错误拦下的比例。Controller 重写率 = 被判 P0 路由到 Reviser 的草稿占比(基线无此拦截=0%)。")
     out.append("")
-    out.append("基线 = 同一批样本在没有该护栏时会原样放行的可证下界, 非重跑旧 LLM 管线。")
+    out.append("**读法**：easy 召回证明护栏接线正确；**hard 召回才是真实强度**——它暴露确定性检测器")
+    out.append("(全名/正则匹配)对改写、别名、隐式表达的盲区。hard 掉下来的部分，正是需要 LLM 审计层")
+    out.append("(audit 的 future_event_leak LLM 路径)兜底、或把检测器升级为别名/语义匹配的地方。")
+    out.append("基线 = 同一批样本在没有该护栏时原样放行的可证下界，非重跑旧 LLM 管线。")
     return "\n".join(out)
 
 
