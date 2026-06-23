@@ -4,7 +4,49 @@ DeepSeek 的 API 与 OpenAI Chat Completions 兼容，仅 base_url / model 不�
 """
 from __future__ import annotations
 
+import os
+import sys
+import threading
+
 from .base import LLMClient
+
+
+class _CacheStats:
+    """进程级 DeepSeek 前缀缓存命中统计（用于量化 KV-cache 优化效果）。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.cache_hit_tokens = 0
+        self.cache_miss_tokens = 0
+
+    def record(self, usage: object) -> None:
+        hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+        miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        with self._lock:
+            self.calls += 1
+            self.prompt_tokens += prompt
+            self.cache_hit_tokens += hit
+            self.cache_miss_tokens += miss
+        if os.environ.get("NOVEL_CACHE_LOG"):
+            denom = hit + miss or prompt or 1
+            print(f"[cache] hit={hit} miss={miss} ratio={hit / denom:.0%}", file=sys.stderr)
+
+    def summary(self) -> dict:
+        with self._lock:
+            denom = self.cache_hit_tokens + self.cache_miss_tokens or self.prompt_tokens or 1
+            return {
+                "calls": self.calls,
+                "prompt_tokens": self.prompt_tokens,
+                "cache_hit_tokens": self.cache_hit_tokens,
+                "cache_miss_tokens": self.cache_miss_tokens,
+                "hit_ratio": self.cache_hit_tokens / denom,
+            }
+
+
+CACHE_STATS = _CacheStats()
 
 
 class DeepSeekClient(LLMClient):
@@ -43,6 +85,8 @@ class DeepSeekClient(LLMClient):
         if "json" in (system + user).lower():
             kwargs["response_format"] = {"type": "json_object"}
         resp = self._client.chat.completions.create(**kwargs)
+        if getattr(resp, "usage", None) is not None:
+            CACHE_STATS.record(resp.usage)
         return resp.choices[0].message.content or ""
 
     @property

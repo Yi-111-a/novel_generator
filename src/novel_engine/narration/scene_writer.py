@@ -210,7 +210,7 @@ class SceneWriter:
         bible_block = (
             f"[世界观·必须据此理解所有设定]\n{bible}\n"
             "其中的专有名词与比喻必须按设定理解、不得望文生义"
-            "（例如『孤岛』指被沦陷区包围、孤悬的租界，不是真的海岛）。\n\n"
+            "（例如『孤岛』指被沦陷区包围、孤悬的租界，不是真的海岛）。"
             if bible else ""
         )
 
@@ -220,11 +220,14 @@ class SceneWriter:
         char_logs = self._character_log_block(ch, list(ch.cast or []), spec.pov)
         idn = self._identity_block(list(ch.cast or []), spec.pov, spec.pov_known)
 
+        # === 稳定前缀（system）===
+        # 只放 tone/style（项目级）+ 固定叙述规则（常量）。全项目每次调用逐字节一致，
+        # 命中 DeepSeek 自动前缀缓存。视角人名与动态世界观检索一律不进 system，
+        # 否则前缀漂移、后面的固定规则每次都得重算（旧实现的缓存杀手）。
         system = (
             tone
-            + bible_block
-            + f"你是小说叙述者，视角=限制性第三人称，POV={pov_name}。"
-            "你只知道 POV 此刻所知 + 读者已知，不得透露 POV 不知道的事，不得写其他人物的内心。\n"
+            + "你是小说叙述者，视角=限制性第三人称。"
+            "只写 POV 此刻所知 + 读者已知，不得透露 POV 不知道的事，不得写其他人物的内心。\n"
             "[反升华红线] 禁止在结尾总结寓意/点题/升华主题；结尾停在具体动作或物象上，把意义留给读者。\n"
             "[段落节奏] 每段控制在 3 句左右、不要写成一大坨；即便是没有对白的描写或独角戏，"
             "也要用动作、感官、停顿把它切成短段，一段聚焦一个动作或一个画面。对白各自成段。\n"
@@ -232,35 +235,45 @@ class SceneWriter:
             + ANTI_AI_FLAVOR_GUIDANCE
         )
 
-        user_parts: list[str] = []
+        # === 变量后缀（user）===
+        # 先放「本章级」块（同章多场之间一致 → 命中章内前缀缓存），再放「本场级」易变块；
+        # feedback / 重写意见永远在最后（重写只往后缀追加，复用首稿前缀）。
+        user_parts: list[str] = [f"[本场视角]POV={pov_name}"]
+        # —— 本章级（同章 3 场之间一致）——
         if arc_ctx:
             user_parts.append(f"[本章在故事中的位置]{arc_ctx}")
-        if prior:
-            user_parts.append(f"[前情梗概（已写过的，本场须承接、不要与之矛盾）]\n{prior}")
         if char_logs:
             user_parts.append(f"[人物近期轨迹（按章累积；本场必须承接行为、心理和下一步意图）]\n{char_logs}")
-        if spec.chapter_digest:
-            user_parts.append(f"[本章已发生（按时间顺序；本场要紧接最后一条往下写）]\n{spec.chapter_digest}")
-        if spec.pov_state:
-            user_parts.append(f"[POV={pov_name} 当前状态]\n{spec.pov_state}")
-        user_parts.append(
-            f"[本场要演的这一拍·必须完整落地]\n{spec.beat}\n"
-            "这一拍就是本场的核心剧情，其中点到的动作、地点、物件、对话、转折都要真正写进正文。"
-        )
+        if prior:
+            user_parts.append(f"[前情梗概（已写过的，本场须承接、不要与之矛盾）]\n{prior}")
+        if geo:
+            user_parts.append(f"[所在之地（调用其中真实环境细节，不要另造地理）]\n{geo}")
+        user_parts.append(f"[在场角色（仅这些，人称与各自性别一致）]{cast_names}")
+        if idn:
+            user_parts.append(f"[在场角色称谓·必须遵守]\n{idn}")
+        user_parts.append(f"[可提及器物（仅这些，不得凭空添置）]{items}")
         user_parts.append(f"[本章戏剧问题]{ch.dramatic_question or '（无）'}　[冲突类型]{ch.conflict_type or '（无）'}")
         if getattr(ch, "time_hint", ""):
             user_parts.append(
                 f"[本章时间·故事时钟]{ch.time_hint}。"
                 "正文里的钟点/时段必须与之一致：时间只能往后走，不得回到更早的时刻。")
-        if geo:
-            user_parts.append(f"[所在之地（调用其中真实环境细节，不要另造地理）]\n{geo}")
+        w = self._word_target(ch)
+        if w:
+            user_parts.append(f"[篇幅]约 {w} 字为宜，宁短勿注水，不要超过 {int(w * 1.3)} 字。")
+        # —— 本场级（每场不同）——
+        if bible_block:
+            user_parts.append(bible_block)
         user_parts.append(f"[POV={pov_name} 此刻所知]\n{known}")
         user_parts.append(f"[读者已知]\n{reader_known}")
-        user_parts.append(f"[在场角色（仅这些，人称与各自性别一致）]{cast_names}")
-        if idn:
-            user_parts.append(f"[在场角色称谓·必须遵守]\n{idn}")
-        user_parts.append(f"[可提及器物（仅这些，不得凭空添置）]{items}")
         user_parts.append(f"[本场可揭示的线索/真相]{may_reveal}")
+        user_parts.append(
+            f"[本场要演的这一拍·必须完整落地]\n{spec.beat}\n"
+            "这一拍就是本场的核心剧情，其中点到的动作、地点、物件、对话、转折都要真正写进正文。"
+        )
+        if spec.pov_state:
+            user_parts.append(f"[POV={pov_name} 当前状态]\n{spec.pov_state}")
+        if spec.chapter_digest:
+            user_parts.append(f"[本章已发生（按时间顺序；本场要紧接最后一条往下写）]\n{spec.chapter_digest}")
         if spec.prev_tail:
             user_parts.append(
                 f"[承接上一场·无缝接续]上一场结尾：「…{spec.prev_tail[-180:]}」\n"
@@ -269,9 +282,6 @@ class SceneWriter:
         if spec.avoid_repeat:
             joined = "\n— — —\n".join(s[:90] for s in spec.avoid_repeat[-3:])
             user_parts.append(f"[不得重复以下近场画面/动作]\n{joined}")
-        w = self._word_target(ch)
-        if w:
-            user_parts.append(f"[篇幅]约 {w} 字为宜，宁短勿注水，不要超过 {int(w * 1.3)} 字。")
         if feedback:
             user_parts.append(f"[上一稿未通过校验，请按以下意见重写]\n{feedback}")
 
