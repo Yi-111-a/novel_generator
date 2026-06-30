@@ -2694,10 +2694,27 @@ class Repository:
         return int(cur.lastrowid)
 
     def clear_source_material(self) -> None:
-        self.conn.execute("DELETE FROM style_negative_samples")
-        self.conn.execute("DELETE FROM style_clusters")
-        self.conn.execute("DELETE FROM style_segments")
-        self.conn.execute("DELETE FROM source_chunks")
+        for table in (
+            "style_negative_samples",
+            "style_clusters",
+            "style_segments",
+            "source_chunks",
+            "distillation_chunks",
+            "narrative_entities",
+            "narrative_state_changes",
+            "narrative_assertions",
+            "narrative_threads",
+            "distilled_knowledge_packages",
+            "source_events",
+            "character_state_snapshots",
+            "settings_codex",
+            "story_arcs",
+            "foreshadow_setups",
+        ):
+            self.conn.execute(f"DELETE FROM {table}")
+        self.conn.execute(
+            "DELETE FROM entities WHERE attributes LIKE '%\"source\": \"unified_distillation\"%'"
+        )
         self.conn.execute("DELETE FROM source_chapters")
         self.conn.execute("DELETE FROM source_documents")
         self._commit()

@@ -109,6 +109,7 @@ class KeyPoolClient(LLMClient):
         }
         if "json" in (system + user).lower():
             payload["response_format"] = {"type": "json_object"}
+            payload["thinking"] = {"type": "disabled"}
         req = urllib.request.Request(
             self._base_url + "/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

@@ -5,6 +5,7 @@ import { getAdapter } from '../adapters';
 import { ContinuationModePicker } from './ContinuationModePicker';
 import { ContinuationProgress } from './ContinuationProgress';
 import { ContinuationSourcePanel } from './ContinuationSourcePanel';
+import { DistillationResultsPanel } from './DistillationResultsPanel';
 import { StyleDiagnosticsPanel } from './StyleDiagnosticsPanel';
 import { VoiceProfilePanel } from './VoiceProfilePanel';
 import type {
@@ -14,6 +15,7 @@ import type {
   ContinuationJobStatus,
   ContinuationSettings,
   ContinuationStyleDiagnostics,
+  DistilledKnowledgePackage,
   DraftContextSnapshot,
   SourceChapter,
   StoryBibleStatus,
@@ -30,18 +32,15 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
   const [continuation, setContinuation] = useState<ContinuationSettings | null>(null);
   const [job, setJob] = useState<ContinuationJobStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<ContinuationStyleDiagnostics | null>(null);
+  const [knowledgePackage, setKnowledgePackage] = useState<DistilledKnowledgePackage | null>(null);
   const [distillConfig, setDistillConfig] = useState<ContinuationDistillConfig>({
-    sampleMode: 'full',
-    graphDetail: 'medium',
-    styleSampleSegments: 6,
-    generateAws: true,
-    enableStyleSkill: true,
-    extractUnresolvedThreads: true,
-    extractCharacterEndings: true,
-    extractFactionState: true,
-    extractExpandableRegions: true,
+    targetChunkChars: 40000,
+    maxChaptersPerChunk: 25,
+    distillWorkers: 4,
+    globalInputMaxChars: 1200000,
   });
   const [sourceChapters, setSourceChapters] = useState<SourceChapter[]>([]);
+  const [sourceFiles, setSourceFiles] = useState<File[]>([]);
   const [accepted, setAccepted] = useState<AcceptedChapter[]>([]);
   const [draft, setDraft] = useState<ChapterDraft | null>(null);
   const [sourceText, setSourceText] = useState('');
@@ -52,7 +51,7 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
   const audit = (draft?.contextSnapshot as DraftContextSnapshot | undefined)?.audit;
 
   const refresh = async () => {
-    const [nextSettings, nextBible, nextStatus, nextContinuation, nextJob, nextAccepted, nextSourceChapters, nextDrafts, nextDiagnostics] = await Promise.all([
+    const [nextSettings, nextBible, nextStatus, nextContinuation, nextJob, nextAccepted, nextSourceChapters, nextDrafts, nextDiagnostics, nextKnowledgePackage] = await Promise.all([
       adapter.getWritingSettings(projectId),
       adapter.getStoryBible(projectId).catch(() => null),
       adapter.getStoryBibleStatus(projectId).catch(() => null),
@@ -62,6 +61,7 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
       adapter.getSourceChapters(projectId).catch(() => []),
       adapter.getChapterDrafts(projectId).catch(() => []),
       adapter.getContinuationStyleDiagnostics(projectId).catch(() => null),
+      adapter.getContinuationKnowledgePackage(projectId).catch(() => null),
     ]);
     setSettings(nextSettings);
     setBible(nextBible);
@@ -72,6 +72,7 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
     setSourceChapters(nextSourceChapters);
     setDraft(nextDrafts.find((row) => row.status === 'pending_acceptance' || row.status === 'draft') ?? null);
     setDiagnostics(nextDiagnostics);
+    setKnowledgePackage(nextKnowledgePackage);
     if (!targetWords) setTargetWords(nextSettings.targetWords);
   };
 
@@ -108,12 +109,21 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
   };
 
   const importSource = async () => {
-    if (!sourceText.trim()) return;
+    if (!sourceText.trim() && sourceFiles.length === 0) return;
     setBusy('source');
     try {
-      await adapter.importContinuationSources(projectId, { text: sourceText, filename: 'source.txt' });
-      await adapter.startContinuationDistill(projectId, distillConfig);
+      if (sourceFiles.length > 0) {
+        await adapter.uploadContinuationSources(projectId, sourceFiles);
+      } else {
+        await adapter.importContinuationSources(projectId, { text: sourceText, filename: 'source.txt' });
+      }
+      const distill = await adapter.startContinuationDistill(projectId, distillConfig);
+      if (!distill.ok) throw new Error(distill.error || '蒸馏未完成');
+      setSourceFiles([]);
+      setSourceText('');
       await refresh();
+    } catch (error) {
+      alert(error instanceof Error ? `导入失败：${error.message}` : '导入失败，请检查文件后重试。');
     } finally {
       setBusy('');
     }
@@ -192,6 +202,8 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
         </p>
       </section>
 
+      <DistillationResultsPanel knowledgePackage={knowledgePackage} />
+
       <section className="grid gap-4 xl:grid-cols-[320px_1fr]">
         <div className="space-y-4">
           <div className="panel p-4">
@@ -239,6 +251,7 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
             busy={busy === 'bible'}
             distillConfig={distillConfig}
             job={job}
+            knowledgePackage={knowledgePackage}
             status={status}
             onConfigChange={setDistillConfig}
             onBuildBible={buildBible}
@@ -246,8 +259,10 @@ export function ContinuationOutlinePanel({ projectId }: { projectId: string }) {
 
           <ContinuationSourcePanel
             busy={busy === 'source'}
+            sourceFiles={sourceFiles}
             sourceText={sourceText}
             sourceChapters={sourceChapters}
+            onSourceFilesChange={setSourceFiles}
             onSourceTextChange={setSourceText}
             onImport={importSource}
           />

@@ -4,7 +4,8 @@ import { getAdapter } from '../adapters';
 import { useProjectCtx } from '../components/Layouts';
 import { Collapsible, Panel } from '../components/ui';
 import { CharacterDrawer, CharactersPanel, FactionDrawer, FactionsPanel, LocationDrawer, LocationsPanel, WorldBiblePanel } from '../components/WorldPanels';
-import type { CharacterCard, Ending, Faction, Persona, PlanLocation, ProjectPlan, SeedDraft } from '../types';
+import { DistillationResultsPanel } from '../components/DistillationResultsPanel';
+import type { CharacterCard, DistilledKnowledgePackage, Ending, Faction, Persona, PlanLocation, ProjectPlan, SeedDraft } from '../types';
 
 const uid = (p: string) => `${p}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -13,6 +14,7 @@ export function WorldConfig() {
   const adapter = getAdapter();
   const [draft, setDraft] = useState<SeedDraft | null>(null);
   const [plan, setPlan] = useState<ProjectPlan | null>(null);
+  const [knowledgePackage, setKnowledgePackage] = useState<DistilledKnowledgePackage | null>(null);
   const [dirty, setDirty] = useState(false);
   const [savedAt, setSavedAt] = useState<string>('');
   // 抽屉态
@@ -26,6 +28,8 @@ export function WorldConfig() {
     if (project.status !== 'seeding') {
       adapter.getPlan(project.id).then(setPlan).catch(() => {});
     }
+    // 续写蒸馏知识包：与续写工坊读同一接口，保证两页一致。
+    adapter.getContinuationKnowledgePackage(project.id).then(setKnowledgePackage).catch(() => setKnowledgePackage(null));
   }, [project.id, project.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!draft) return <div className="p-6 text-sm text-zinc-400">载入中…</div>;
@@ -66,6 +70,8 @@ export function WorldConfig() {
 
       {plan?.continuation && <ContinuationSummaryPanel plan={plan} />}
 
+      {knowledgePackage?.package ? <DistillationResultsPanel knowledgePackage={knowledgePackage} /> : null}
+
       {plan?.planned ? (
         <>
           {/* 锁定后：引擎权威设定是主体 */}
@@ -74,13 +80,6 @@ export function WorldConfig() {
             <LocationsPanel locations={plan.locations ?? []} onPickLocation={setLocFor} />
             <FactionsPanel factions={plan.factions ?? []} locations={plan.locations ?? []} onPickFaction={setFacFor} />
             <CharactersPanel cards={plan.characterCards ?? []} onPickCard={setCharFor} />
-            <DisclosureTimelinePanel
-              projectId={project.id}
-              cards={plan.characterCards ?? []}
-              locations={plan.locations ?? []}
-              factions={plan.factions ?? []}
-              onSaved={() => adapter.getPlan(project.id).then(setPlan)}
-            />
             {plan?.continuation && <ForeshadowPanel foreshadows={plan.foreshadows ?? []} />}
             {plan?.continuation && <StoryArcsPanel arcs={plan.storyArcs ?? []} />}
             {plan?.continuation && <OpenThreadsPanel threads={plan.openThreads ?? []} />}
@@ -413,99 +412,3 @@ function SettingsCodexPanel({ codex }: { codex: any[] }) {
   );
 }
 
-type DisclosureEntity = {
-  id: string;
-  name: string;
-  kind: string;
-  foreshadowFrom?: number;
-  revealChapter?: number;
-  secretRevealChapter?: number;
-  foreshadowHint?: string;
-  secretTruth?: string;
-};
-
-function DisclosureTimelinePanel({ projectId, cards, locations, factions, onSaved }: {
-  projectId: string;
-  cards: CharacterCard[];
-  locations: PlanLocation[];
-  factions: Faction[];
-  onSaved: () => void;
-}) {
-  const rows: DisclosureEntity[] = [
-    ...cards.filter((card) => card.agentId).map((card) => ({
-      ...card, id: card.agentId as string, name: card.displayName || card.name, kind: '人物',
-    })),
-    ...locations.map((loc) => ({ ...loc, id: loc.locId, name: loc.name, kind: '地点' })),
-    ...factions.map((fac) => ({ ...fac, id: fac.factionId, name: fac.name, kind: '势力' })),
-  ];
-  if (!rows.length) return null;
-  return (
-    <Panel title="披露时间线">
-      <p className="mb-3 text-xs text-zinc-500">
-        0=沿用旧行为；伏笔章到登场章之间只允许注入不点名的提示，揭秘章之后才开放秘密面。
-      </p>
-      <div className="space-y-2">
-        {rows.map((row) => (
-          <DisclosureTimelineRow key={`${row.kind}-${row.id}`} projectId={projectId} row={row} onSaved={onSaved} />
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
-function DisclosureTimelineRow({ projectId, row, onSaved }: {
-  projectId: string;
-  row: DisclosureEntity;
-  onSaved: () => void;
-}) {
-  const adapter = getAdapter();
-  const [value, setValue] = useState({
-    foreshadowFrom: Number(row.foreshadowFrom || 0),
-    revealChapter: Number(row.revealChapter || 0),
-    secretRevealChapter: Number(row.secretRevealChapter || 0),
-    foreshadowHint: row.foreshadowHint || '',
-    secretTruth: row.secretTruth || '',
-  });
-  const [busy, setBusy] = useState(false);
-  const save = () => {
-    setBusy(true);
-    adapter.updateDisclosure(projectId, row.id, value)
-      .then(onSaved)
-      .catch(() => alert(`保存「${row.name}」披露日程失败`))
-      .finally(() => setBusy(false));
-  };
-  return (
-    <div className="rounded-md border border-zinc-200 p-2 dark:border-zinc-800">
-      <div className="mb-2 flex items-center gap-2 text-xs">
-        <span className="chip bg-indigo-500/15 text-indigo-400">{row.kind}</span>
-        <span className="font-medium">{row.name}</span>
-        <button className="btn-ghost ml-auto" disabled={busy} onClick={save}>
-          <Save className="h-3.5 w-3.5" />保存
-        </button>
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        {([
-          ['foreshadowFrom', '伏笔起始章'],
-          ['revealChapter', '正式登场章'],
-          ['secretRevealChapter', '秘密揭晓章'],
-        ] as const).map(([key, label]) => (
-          <label key={key} className="text-[11px] text-zinc-500">
-            {label}
-            <input className="input mt-1" type="number" min={0} value={value[key]}
-              onChange={(event) => setValue({ ...value, [key]: Number(event.target.value || 0) })} />
-          </label>
-        ))}
-      </div>
-      <label className="mt-2 block text-[11px] text-zinc-500">
-        伏笔提示（不得点名、不得解释）
-        <input className="input mt-1" value={value.foreshadowHint}
-          onChange={(event) => setValue({ ...value, foreshadowHint: event.target.value })} />
-      </label>
-      <label className="mt-2 block text-[11px] text-zinc-500">
-        秘密面（只在揭秘章后进入 prompt）
-        <textarea className="input mt-1 min-h-16" value={value.secretTruth}
-          onChange={(event) => setValue({ ...value, secretTruth: event.target.value })} />
-      </label>
-    </div>
-  );
-}

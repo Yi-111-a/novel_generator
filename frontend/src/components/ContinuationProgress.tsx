@@ -1,11 +1,18 @@
 import { Sparkles } from 'lucide-react';
-import type { ContinuationDistillConfig, ContinuationJobStatus, StoryBibleStatus, StoryBibleV2 } from '../types';
+import type {
+  ContinuationDistillConfig,
+  ContinuationJobStatus,
+  DistilledKnowledgePackage,
+  StoryBibleStatus,
+  StoryBibleV2,
+} from '../types';
 
 interface ContinuationProgressProps {
   bible: StoryBibleV2 | null;
   busy: boolean;
   distillConfig: ContinuationDistillConfig;
   job: ContinuationJobStatus | null;
+  knowledgePackage: DistilledKnowledgePackage | null;
   status: StoryBibleStatus | null;
   onConfigChange: (next: ContinuationDistillConfig) => void;
   onBuildBible: () => void;
@@ -16,6 +23,7 @@ export function ContinuationProgress({
   busy,
   distillConfig,
   job,
+  knowledgePackage,
   status,
   onConfigChange,
   onBuildBible,
@@ -24,100 +32,70 @@ export function ContinuationProgress({
     <div className="panel p-4">
       <div className="flex items-center gap-2 text-sm font-semibold">
         <Sparkles className="h-4 w-4 text-amber-400" />
-        Story Bible
+        叙事蒸馏
       </div>
       <button className="btn-primary mt-3 w-full" onClick={onBuildBible} disabled={busy}>
         重建 Story Bible
       </button>
+
       <div className="mt-3 space-y-3 text-sm">
         <label className="block">
-          <div className="mb-1 text-zinc-500">章节抽样</div>
-          <select
-            className="input"
-            value={distillConfig.sampleMode}
-            onChange={(e) => onConfigChange({ ...distillConfig, sampleMode: e.target.value as ContinuationDistillConfig['sampleMode'] })}
-          >
-            <option value="fast">快速抽样</option>
-            <option value="representative">代表性抽样</option>
-            <option value="full">全量</option>
-          </select>
-        </label>
-        <label className="block">
-          <div className="mb-1 text-zinc-500">图谱层级</div>
-          <select
-            className="input"
-            value={distillConfig.graphDetail}
-            onChange={(e) => onConfigChange({ ...distillConfig, graphDetail: e.target.value as ContinuationDistillConfig['graphDetail'] })}
-          >
-            <option value="light">轻</option>
-            <option value="medium">中</option>
-            <option value="heavy">重</option>
-          </select>
-        </label>
-        <label className="block">
-          <div className="mb-1 text-zinc-500">文风抽样段数</div>
+          <div className="mb-1 text-zinc-500">目标分块字数</div>
           <input
             className="input"
             type="number"
-            value={distillConfig.styleSampleSegments}
-            onChange={(e) => onConfigChange({ ...distillConfig, styleSampleSegments: Number(e.target.value) || 6 })}
+            min={10000}
+            max={120000}
+            step={5000}
+            value={distillConfig.targetChunkChars}
+            onChange={(event) => onConfigChange({
+              ...distillConfig,
+              targetChunkChars: Number(event.target.value) || 40000,
+            })}
           />
+          <div className="mt-1 text-xs text-zinc-400">保持完整章节，默认约 3–5 万字一块。</div>
         </label>
-        <label className="flex items-center gap-2 text-zinc-500">
+        <label className="block">
+          <div className="mb-1 text-zinc-500">每块最多章节</div>
           <input
-            type="checkbox"
-            checked={distillConfig.generateAws}
-            onChange={(e) => onConfigChange({ ...distillConfig, generateAws: e.target.checked })}
+            className="input"
+            type="number"
+            min={1}
+            max={60}
+            value={distillConfig.maxChaptersPerChunk}
+            onChange={(event) => onConfigChange({
+              ...distillConfig,
+              maxChaptersPerChunk: Number(event.target.value) || 25,
+            })}
           />
-          生成 AWS
         </label>
-        <label className="flex items-center gap-2 text-zinc-500">
+        <label className="block">
+          <div className="mb-1 text-zinc-500">并发分块数</div>
           <input
-            type="checkbox"
-            checked={distillConfig.enableStyleSkill}
-            onChange={(e) => onConfigChange({ ...distillConfig, enableStyleSkill: e.target.checked })}
+            className="input"
+            type="number"
+            min={1}
+            max={12}
+            value={distillConfig.distillWorkers}
+            onChange={(event) => onConfigChange({
+              ...distillConfig,
+              distillWorkers: Number(event.target.value) || 4,
+            })}
           />
-          启用 style_skill
         </label>
-        <label className="flex items-center gap-2 text-zinc-500">
-          <input
-            type="checkbox"
-            checked={distillConfig.extractUnresolvedThreads}
-            onChange={(e) => onConfigChange({ ...distillConfig, extractUnresolvedThreads: e.target.checked })}
-          />
-          抽未解伏笔
-        </label>
-        <label className="flex items-center gap-2 text-zinc-500">
-          <input
-            type="checkbox"
-            checked={distillConfig.extractCharacterEndings}
-            onChange={(e) => onConfigChange({ ...distillConfig, extractCharacterEndings: e.target.checked })}
-          />
-          抽角色终局
-        </label>
-        <label className="flex items-center gap-2 text-zinc-500">
-          <input
-            type="checkbox"
-            checked={distillConfig.extractFactionState}
-            onChange={(e) => onConfigChange({ ...distillConfig, extractFactionState: e.target.checked })}
-          />
-          抽势力格局
-        </label>
-        <label className="flex items-center gap-2 text-zinc-500">
-          <input
-            type="checkbox"
-            checked={distillConfig.extractExpandableRegions}
-            onChange={(e) => onConfigChange({ ...distillConfig, extractExpandableRegions: e.target.checked })}
-          />
-          抽可扩展区域
-        </label>
+        <div className="rounded-lg border border-zinc-200 p-3 text-xs leading-5 text-zinc-500 dark:border-zinc-800">
+          每个分块只调用一次模型，同时抽取实体、事件、状态变化、叙事知识、情节线程和文风样本。
+          只有覆盖校验失败时才会拆小重试。
+        </div>
       </div>
-      {bible && (
+
+      {(bible || job) && (
         <div className="mt-3 space-y-2 text-xs text-zinc-500">
-          <div>来源类型：{bible.sourceType}</div>
-          <div>时间线条目：{bible.timeline.length}</div>
-          <div>开放问题：{bible.openThreads.length}</div>
+          {bible ? <div>来源类型：{bible.sourceType}</div> : null}
+          {bible ? <div>时间线条目：{bible.timeline.length}</div> : null}
+          {bible ? <div>开放问题：{bible.openThreads.length}</div> : null}
           {job ? <div>蒸馏进度：{job.progress ?? 0}/{job.total ?? 0} · {job.status}</div> : null}
+          {job?.error ? <div className="text-red-500">失败原因：{job.error}</div> : null}
           {status?.pendingDraftId ? <div>待验收章节：第 {status.pendingChapterNo} 章</div> : null}
           {status?.continuationPhase ? <div>当前阶段：{status.continuationPhase}</div> : null}
           {job?.steps?.length ? (
@@ -132,6 +110,23 @@ export function ContinuationProgress({
               ))}
             </div>
           ) : null}
+        </div>
+      )}
+
+      {knowledgePackage?.stats && (
+        <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 dark:border-emerald-900 dark:bg-emerald-950/20">
+          <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">小说知识包</div>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+            <div>实体：{knowledgePackage.stats.entities ?? 0}</div>
+            <div>事件：{knowledgePackage.stats.events ?? 0}</div>
+            <div>知识声明：{knowledgePackage.stats.assertions ?? 0}</div>
+            <div>状态变化：{knowledgePackage.stats.stateChanges ?? 0}</div>
+            <div>情节线程：{knowledgePackage.stats.threads ?? 0}</div>
+            <div>文风样本：{knowledgePackage.stats.styleSamples ?? 0}</div>
+            <div className={(knowledgePackage.stats.unverifiedEvidence ?? 0) > 0 ? 'text-amber-600 dark:text-amber-300' : ''}>
+              未核验证据：{knowledgePackage.stats.unverifiedEvidence ?? 0}
+            </div>
+          </div>
         </div>
       )}
     </div>

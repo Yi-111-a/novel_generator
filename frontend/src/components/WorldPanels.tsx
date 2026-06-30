@@ -83,7 +83,7 @@ export function WorldBiblePanel({ projectId, sections }: { projectId: string; se
     <section className="panel p-4">
       <h3 className="flex items-center gap-2 text-sm font-semibold">
         <Globe className="h-4 w-4 text-teal-400" /> 世界观设定（W1 权威两级）
-        <span className="chip bg-teal-500/15 text-teal-400">{keys.filter((k) => bySection.get(k)?.w1).length} 节已建档</span>
+        <span className="chip bg-teal-500/15 text-teal-400">{keys.length} 节已建档</span>
       </h3>
       <ul className="mt-3 space-y-1.5">
         {keys.map((k) => {

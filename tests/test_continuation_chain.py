@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import io
+import zipfile
+
 from novel_engine import db
 from novel_engine.continuation import (
     build_continuation_snapshot,
@@ -12,6 +15,7 @@ from novel_engine.continuation import (
     distill_continuation_structures,
     distill_continuation_world,
     ensure_continuation_chapter_plan,
+    import_uploaded_into_repo,
     next_chapter_no,
 )
 from novel_engine.llm.mock import MockClient
@@ -53,6 +57,28 @@ def _import(repo: Repository, text: str = SOURCE) -> None:
 def test_chapter_splitter_finds_titled_chapters():
     chs = split_text_into_chapters(SOURCE)
     assert [t for t, _ in chs] == ["第一章 风起", "第二章 暗涌"]
+
+
+def test_uploaded_txt_and_epub_are_imported_without_temp_files():
+    repo = _bootstrap()
+    epub = io.BytesIO()
+    with zipfile.ZipFile(epub, "w") as archive:
+        archive.writestr(
+            "OEBPS/chapter1.xhtml",
+            "<html><body><h1>第一章 EPUB</h1><p>" + ("山雨欲来。" * 80) + "</p></body></html>",
+        )
+    result = import_uploaded_into_repo(
+        repo,
+        project_id="p1",
+        created_at="now",
+        files=[
+            ("开篇.txt", ("第一章 文本\n" + "风从城门吹进来。" * 80).encode("utf-8")),
+            ("第二卷.epub", epub.getvalue()),
+        ],
+    )
+    assert result == {"documents": 2, "chapters": 2}
+    assert [doc.filename for doc in repo.list_source_documents()] == ["开篇.txt", "第二卷.epub"]
+    assert [chapter.chapter_no for chapter in repo.list_source_chapters()] == [1, 2]
 
 
 def test_default_writing_settings_present():
@@ -389,7 +415,7 @@ def test_author_experience_layer_distills_life_model(tmp_path):
     assert summary["lifeModel"] is not None
 
 
-def test_project_continuation_distill_keeps_active_life_model_id(tmp_path):
+def test_project_distillation_stops_before_optional_experience_layer(tmp_path):
     project = Project("测试续写", project_type="continuation")
     project.ensure_writing_repo()
     assert project.repo is not None
@@ -423,10 +449,9 @@ def test_project_continuation_distill_keeps_active_life_model_id(tmp_path):
     )
     assert res["ok"] is True
     meta = project.repo.get_continuation_meta()
-    assert meta.active_life_model_id != ""
-    assert len(project.repo.list_edges()) >= 1
+    assert meta.active_life_model_id == ""
+    assert meta.continuation_phase == "distilled"
+    assert project.repo.latest_continuation_job().total == 4
     story_bible = project.repo.get_story_bible_record()
     assert story_bible is not None
-    assert story_bible.world_config_json["sections"]
-    assert len(story_bible.relationships_json) >= 1
-    assert project.style_diagnostics()["corpus"]["lifeModel"] is not None
+    assert story_bible.narrative_constraints_json["source"] == "unified_distillation"

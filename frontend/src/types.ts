@@ -323,15 +323,43 @@ export interface ContinuationJobStatus {
 }
 
 export interface ContinuationDistillConfig {
-  sampleMode: 'fast' | 'representative' | 'full';
-  graphDetail: 'light' | 'medium' | 'heavy';
-  styleSampleSegments: number;
-  generateAws: boolean;
-  enableStyleSkill: boolean;
-  extractUnresolvedThreads: boolean;
-  extractCharacterEndings: boolean;
-  extractFactionState: boolean;
-  extractExpandableRegions: boolean;
+  targetChunkChars: number;
+  maxChaptersPerChunk: number;
+  distillWorkers: number;
+  globalInputMaxChars: number;
+}
+
+export interface DistilledKnowledgePackage {
+  package: {
+    world_setting?: Record<string, unknown>;
+    characters?: Record<string, unknown>[];
+    locations?: Record<string, unknown>[];
+    factions?: Record<string, unknown>[];
+    chapter_events?: Record<string, unknown>[];
+    final_state?: Record<string, unknown>;
+    state_buckets?: Record<string, unknown>;
+    timeline?: Record<string, unknown>[];
+    relationship_graph?: Record<string, unknown>[];
+    plot_threads?: Record<string, unknown>[];
+    style_profile?: Record<string, unknown>;
+    uncertainties?: Record<string, unknown>[];
+    knowledge_assertions?: Record<string, unknown>[];
+    other_entities?: Record<string, unknown>[];
+    entity_index?: Record<string, string>;
+  };
+  stats: {
+    usedFallback?: boolean;
+    profiledCharacters?: number;
+    globalInputChars?: number;
+    entities?: number;
+    events?: number;
+    assertions?: number;
+    stateChanges?: number;
+    threads?: number;
+    styleSamples?: number;
+    unverifiedEvidence?: number;
+  };
+  updatedAt?: string;
 }
 
 export interface SimulationControlResult {

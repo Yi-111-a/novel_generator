@@ -465,6 +465,7 @@ export class MockAdapter implements EngineAdapter {
   async getStoryBible() { return null; }
   async importSourceText(_projectId: string, body: { text: string; filename?: string }) { return { ok: true, chapters: body.text.trim() ? 1 : 0, filename: body.filename || 'source.txt' }; }
   async importContinuationSources(_projectId: string, body: { text: string; filename?: string }) { return { ok: true, chapters: body.text.trim() ? 1 : 0, filename: body.filename || 'source.txt' }; }
+  async uploadContinuationSources(_projectId: string, files: File[]) { return { ok: true, chapters: files.length, documents: files.length, filename: files.map((file) => file.name).join(', ') }; }
   async getSourceChapters() { return []; }
   async updateSourceChapter() { return { ok: true }; }
   async resplitSource() { return { ok: true, chapters: 0 }; }
@@ -497,16 +498,13 @@ export class MockAdapter implements EngineAdapter {
     return {
       status: 'done',
       progress: 7,
-      total: 7,
-      currentStep: 'B7',
+      total: 4,
+      currentStep: 'B4',
       steps: [
         { code: 'B1', label: '导入分章', status: 'done' as const },
-        { code: 'B2', label: '世界书', status: 'done' as const },
-        { code: 'B3', label: '人物地点势力', status: 'done' as const },
-        { code: 'B4', label: '系列状态', status: 'done' as const },
-        { code: 'B5', label: '图谱', status: 'done' as const },
-        { code: 'B6', label: '文风', status: 'done' as const },
-        { code: 'B7', label: '快照', status: 'done' as const },
+        { code: 'B2', label: '章节整块·统一抽取', status: 'done' as const },
+        { code: 'B3', label: '程序归并·状态演算', status: 'done' as const },
+        { code: 'B4', label: '全局小说知识包', status: 'done' as const },
       ],
     };
   }
@@ -523,6 +521,12 @@ export class MockAdapter implements EngineAdapter {
         clusters: [],
       },
       latestDraft: null,
+    };
+  }
+  async getContinuationKnowledgePackage() {
+    return {
+      package: {},
+      stats: { entities: 0, events: 0, assertions: 0, stateChanges: 0, threads: 0, styleSamples: 0 },
     };
   }
   async lockContinuation() { return { ...(await this.getContinuationSettings()), continuationReady: true, ok: true }; }

@@ -296,6 +296,16 @@ def build_repo_from_draft(draft: dict[str, Any], db_path: str = ":memory:") -> R
     for section, title, body in section_entries:
         repo.add_bible_section(section, title, body, source="user")
 
+    # 可选的三层大纲合同：让外部 Agent / 导入脚本在不新增数据库结构的前提下，
+    # 把用户明确给出的体量、分卷蓝图与首个锁定单元交给原生 Planner。
+    # 合同仍落在既有 world_bible_sections(outline_contract) 中，并由
+    # story_contract 的统一归一化与校验逻辑管理。
+    outline_contract = draft.get("outlineContract")
+    if isinstance(outline_contract, dict) and outline_contract:
+        from novel_engine.story_contract import save_story_contract
+
+        save_story_contract(repo, dict(outline_contract))
+
     personas = draft.get("personas", []) or []
     # 实体：角色 + 关联意象（道具）+ 一个默认地点
     repo.insert_entity(Entity("loc_main", "location", "主场景", {}))

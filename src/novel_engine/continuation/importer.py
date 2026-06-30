@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 import re
 import zipfile
@@ -32,8 +33,42 @@ def load_sources(*, text: str = "", filename: str = "", file_path: str = "", fil
     return out
 
 
+def load_uploaded_sources(files: list[tuple[str, bytes]]) -> list[ImportedSource]:
+    out: list[ImportedSource] = []
+    for filename, payload in files:
+        safe_name = Path(filename or "source.txt").name
+        suffix = Path(safe_name).suffix.lower()
+        if suffix == ".epub":
+            text = _extract_epub_text(io.BytesIO(payload))
+        else:
+            text = _decode_text(payload)
+        out.append(ImportedSource(filename=safe_name, format=_suffix_to_format(safe_name), text=text))
+    return out
+
+
 def import_into_repo(repo: Repository, *, project_id: str, created_at: str, text: str = "", filename: str = "", file_path: str = "", file_paths: list[str] | None = None) -> dict[str, int | str]:
     sources = load_sources(text=text, filename=filename, file_path=file_path, file_paths=file_paths)
+    return _persist_sources(repo, sources=sources, project_id=project_id, created_at=created_at)
+
+
+def import_uploaded_into_repo(
+    repo: Repository,
+    *,
+    project_id: str,
+    created_at: str,
+    files: list[tuple[str, bytes]],
+) -> dict[str, int | str]:
+    sources = load_uploaded_sources(files)
+    return _persist_sources(repo, sources=sources, project_id=project_id, created_at=created_at)
+
+
+def _persist_sources(
+    repo: Repository,
+    *,
+    sources: list[ImportedSource],
+    project_id: str,
+    created_at: str,
+) -> dict[str, int | str]:
     if not sources:
         return {"documents": 0, "chapters": 0}
 
@@ -89,9 +124,18 @@ def _suffix_to_format(name: str) -> str:
     return "txt"
 
 
-def _extract_epub_text(epub_path: Path) -> str:
+def _decode_text(payload: bytes) -> str:
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="ignore")
+
+
+def _extract_epub_text(epub_source: Path | io.BytesIO) -> str:
     parts: list[str] = []
-    with zipfile.ZipFile(epub_path) as zf:
+    with zipfile.ZipFile(epub_source) as zf:
         names = sorted(
             n
             for n in zf.namelist()

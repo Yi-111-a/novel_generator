@@ -10,31 +10,37 @@ const TYPE_LABEL: Record<string, string> = {
 };
 const REL_COLOR: Record<string, string> = {
   hostile: '#ef4444', allied: '#22c55e', controls: '#f59e0b', infiltrates: '#e879f9',
+  // 人物向关系（叙事蒸馏）：恋人/血亲/师徒/竞争
+  romance: '#ec4899', kin: '#14b8a6', mentor: '#818cf8', rival: '#fb923c',
   member_of: '#64748b', has_member: '#64748b', located_in: '#475569',
   knows: '#94a3b8', related_to: '#94a3b8',
 };
 const REL_LABEL: Record<string, string> = {
   hostile: '敌对', allied: '结盟', controls: '控制', infiltrates: '渗透',
+  romance: '恋人', kin: '血亲', mentor: '师徒', rival: '竞争',
   member_of: '从属', has_member: '统属', located_in: '位于',
   knows: '相识', related_to: '关联',
 };
 
 const TIER: Record<string, 'primary' | 'structural' | 'weak'> = {
   hostile: 'primary', allied: 'primary', controls: 'primary', infiltrates: 'primary',
+  romance: 'primary', kin: 'primary', mentor: 'primary', rival: 'primary',
   member_of: 'structural', has_member: 'structural', located_in: 'structural',
   knows: 'weak', related_to: 'weak',
 };
-const PRIMARY_RELS = ['hostile', 'allied', 'controls', 'infiltrates'];
+const PRIMARY_RELS = ['hostile', 'allied', 'controls', 'infiltrates', 'romance', 'kin', 'mentor', 'rival'];
 const STRUCTURAL_RELS = ['member_of', 'has_member', 'located_in'];
 const WEAK_RELS = ['knows', 'related_to'];
 
 const LINK_DIST: Record<string, number> = {
   member_of: 72, has_member: 72, located_in: 58, controls: 130,
   hostile: 260, allied: 210, infiltrates: 220, knows: 170, related_to: 110,
+  romance: 90, kin: 90, mentor: 120, rival: 200,
 };
 const LINK_STR: Record<string, number> = {
   member_of: 0.25, has_member: 0.25, located_in: 0.7, controls: 0.12,
   hostile: 0.015, allied: 0.03, infiltrates: 0.015, knows: 0.005, related_to: 0.03,
+  romance: 0.12, kin: 0.14, mentor: 0.08, rival: 0.02,
 };
 
 /* ── 模拟节点扩展 ── */
