@@ -17,7 +17,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 
@@ -351,6 +351,38 @@ async def import_continuation_source(project_id: str, body: dict[str, Any]):
     return res
 
 
+@app.post("/api/projects/{project_id}/continuation/upload")
+async def upload_continuation_sources(
+    project_id: str,
+    files: list[UploadFile] = File(...),
+):
+    allowed_suffixes = {".txt", ".epub"}
+    max_file_bytes = 50 * 1024 * 1024
+    max_total_bytes = 100 * 1024 * 1024
+    if len(files) > 20:
+        raise HTTPException(400, "一次最多上传 20 个文件")
+    uploaded: list[tuple[str, bytes]] = []
+    total_bytes = 0
+    for file in files:
+        filename = Path(file.filename or "source.txt").name
+        if Path(filename).suffix.lower() not in allowed_suffixes:
+            raise HTTPException(415, f"不支持的文件格式：{filename}")
+        payload = await file.read(max_file_bytes + 1)
+        await file.close()
+        if len(payload) > max_file_bytes:
+            raise HTTPException(413, f"文件超过 50 MB：{filename}")
+        if not payload:
+            raise HTTPException(400, f"文件为空：{filename}")
+        total_bytes += len(payload)
+        if total_bytes > max_total_bytes:
+            raise HTTPException(413, "本次上传总大小超过 100 MB")
+        uploaded.append((filename, payload))
+    p = _project(project_id)
+    res = await p.run(p.import_source_uploads, uploaded)
+    manager.persist()
+    return res
+
+
 @app.get("/api/projects/{project_id}/continuation/source")
 async def get_continuation_source(project_id: str):
     p = _project(project_id)
@@ -375,6 +407,12 @@ async def get_continuation_job(project_id: str):
 async def get_continuation_style_diagnostics(project_id: str):
     p = _project(project_id)
     return await p.read_run(p.style_diagnostics)
+
+
+@app.get("/api/projects/{project_id}/continuation/knowledge-package")
+async def get_continuation_knowledge_package(project_id: str):
+    p = _project(project_id)
+    return await p.read_run(p.continuation_knowledge_package)
 
 
 @app.get("/api/projects/{project_id}/continuation/stream")

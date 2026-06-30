@@ -41,54 +41,9 @@ export function ContinuationModePicker({
             onChange={(e) => onChange({ ...continuation, continuationHint: e.target.value })}
           />
         </label>
-        <label className="block rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-zinc-700 dark:text-zinc-200">最高级蒸馏：作者经历层</div>
-              <div className="mt-1 text-xs text-zinc-500">从随笔与经历材料里抽作者人格，再把它压进续写。</div>
-            </div>
-            <input
-              type="checkbox"
-              checked={continuation.experienceLayerEnabled}
-              onChange={(e) => onChange({ ...continuation, experienceLayerEnabled: e.target.checked })}
-            />
-          </div>
-        </label>
-        {continuation.experienceLayerEnabled && (
-          <>
-            <label className="block">
-              <div className="mb-1 text-zinc-500">经历层模式</div>
-              <select
-                className="input"
-                value={continuation.experienceLayerMode}
-                onChange={(e) => onChange({ ...continuation, experienceLayerMode: e.target.value })}
-              >
-                <option value="essay">仅作者随笔</option>
-                <option value="essay_plus_text">随笔 + 原作校准</option>
-              </select>
-            </label>
-            <label className="block">
-              <div className="mb-1 text-zinc-500">经历层材料路径</div>
-              <input
-                className="input"
-                value={continuation.experienceSourcePath}
-                onChange={(e) => onChange({ ...continuation, experienceSourcePath: e.target.value })}
-                placeholder="C:\\Users\\...\\江南随笔.epub"
-              />
-            </label>
-            <label className="block">
-              <div className="mb-1 text-zinc-500">蒸馏级别</div>
-              <select
-                className="input"
-                value={continuation.experienceStyleLevel}
-                onChange={(e) => onChange({ ...continuation, experienceStyleLevel: e.target.value })}
-              >
-                <option value="high">高</option>
-                <option value="max">最高</option>
-              </select>
-            </label>
-          </>
-        )}
+        <div className="rounded-xl border border-dashed border-zinc-300 p-3 text-xs leading-5 text-zinc-500 dark:border-zinc-700">
+          作者经历层、续写大纲和写作快照暂不属于本次 B1–B4 原作蒸馏，后续会作为独立步骤接入。
+        </div>
         {continuation.writeMode === 'new_series_book' && (
           <>
             <label className="block">

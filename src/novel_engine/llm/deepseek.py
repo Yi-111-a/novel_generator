@@ -84,6 +84,9 @@ class DeepSeekClient(LLMClient):
         }
         if "json" in (system + user).lower():
             kwargs["response_format"] = {"type": "json_object"}
+            # 批量结构化抽取不需要长思维链。V4 默认开启 thinking；显式关闭可避免
+            # 数千次抽取产生不可见的 reasoning token，同时 temperature 才真正生效。
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         resp = self._client.chat.completions.create(**kwargs)
         if getattr(resp, "usage", None) is not None:
             CACHE_STATS.record(resp.usage)

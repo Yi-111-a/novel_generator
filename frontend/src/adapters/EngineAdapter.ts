@@ -9,6 +9,7 @@ import type {
   ContinuationJobStatus,
   ContinuationSettings,
   ContinuationStyleDiagnostics,
+  DistilledKnowledgePackage,
   ControlAction,
   Dossier,
   Ending,
@@ -102,14 +103,16 @@ export interface EngineAdapter {
   getStoryBible(projectId: string): Promise<StoryBibleV2 | null>;
   importSourceText(projectId: string, body: { text: string; filename?: string }): Promise<{ ok: boolean; chapters: number; filename: string }>;
   importContinuationSources(projectId: string, body: { text: string; filename?: string }): Promise<{ ok: boolean; chapters: number; filename: string }>;
+  uploadContinuationSources(projectId: string, files: File[]): Promise<{ ok: boolean; chapters: number; filename: string; documents?: number }>;
   getSourceChapters(projectId: string): Promise<SourceChapter[]>;
   updateSourceChapter(projectId: string, chapterId: number, body: { title?: string; text?: string; summary?: string }): Promise<{ ok: boolean }>;
   resplitSource(projectId: string): Promise<{ ok: boolean; chapters?: number }>;
   getContinuationSettings(projectId: string): Promise<ContinuationSettings>;
   saveContinuationSettings(projectId: string, body: Partial<ContinuationSettings>): Promise<ContinuationSettings & { ok?: boolean }>;
-  startContinuationDistill(projectId: string, body: ContinuationDistillConfig): Promise<{ ok: boolean; jobId?: string }>;
+  startContinuationDistill(projectId: string, body: ContinuationDistillConfig): Promise<{ ok: boolean; jobId?: string; error?: string }>;
   getContinuationJob(projectId: string): Promise<ContinuationJobStatus>;
   getContinuationStyleDiagnostics(projectId: string): Promise<ContinuationStyleDiagnostics>;
+  getContinuationKnowledgePackage(projectId: string): Promise<DistilledKnowledgePackage>;
   lockContinuation(projectId: string): Promise<ContinuationSettings & { ok?: boolean }>;
   createChapterDraft(projectId: string, body: { guidance?: string; targetWords?: number; outlineOnly?: boolean; mode?: 'manual' | 'auto' }): Promise<ChapterDraft>;
   getChapterDrafts(projectId: string): Promise<ChapterDraft[]>;

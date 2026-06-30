@@ -26,16 +26,16 @@ from novel_engine.repository import Repository
 from novel_engine.tone import build_tone_profile
 from novel_engine.worldsmith import WorldSmith
 from novel_engine.continuation import (
-    aggregate_full_book,
-    build_continuation_outline,
     build_continuation_snapshot,
-    distill_all_chapters,
-    distill_continuation_graph,
-    distill_continuation_structures,
-    distill_continuation_world,
+    extract_unified_blocks,
+    get_knowledge_package,
     import_into_repo,
+    import_uploaded_into_repo,
     normalize_write_mode,
+    reduce_unified_distillation,
     resolve_chapter_start_no,
+    review_and_augment,
+    synthesize_knowledge_package,
 )
 
 from . import config_store, dossier, schemas, seedbuilder
@@ -58,12 +58,9 @@ MIN_SCENES_PER_CHAPTER = 2  # 一章至少多少场，避免单场成章
 _CN_DIGITS = "零一二三四五六七八九"
 CONTINUATION_PHASE_STEPS: list[tuple[str, str]] = [
     ("B1", "导入·清洗·分章"),
-    ("B2", "世界配置"),
-    ("B3", "逐章蒸馏(事件/人物/设定/伏笔)"),
-    ("B4", "全书聚合(弧线/书末/时间线/图谱/伏笔配对)"),
-    ("B5", "续写全书大纲"),
-    ("B6", "文风·经历层"),
-    ("B7", "写作快照"),
+    ("B2", "章节整块·统一抽取"),
+    ("B3", "程序归并·状态演算"),
+    ("B4", "全局小说知识包"),
 ]
 
 
@@ -86,15 +83,13 @@ def _num_cn(n: int) -> str:
 def _normalize_distill_config(body: dict[str, Any] | None) -> dict[str, Any]:
     raw = body or {}
     return {
-        "sampleMode": raw.get("sampleMode", "full") or "full",
-        "graphDetail": raw.get("graphDetail", "medium") or "medium",
-        "styleSampleSegments": int(raw.get("styleSampleSegments", 6) or 6),
-        "generateAws": bool(raw.get("generateAws", True)),
-        "enableStyleSkill": bool(raw.get("enableStyleSkill", True)),
-        "extractUnresolvedThreads": bool(raw.get("extractUnresolvedThreads", True)),
-        "extractCharacterEndings": bool(raw.get("extractCharacterEndings", True)),
-        "extractFactionState": bool(raw.get("extractFactionState", True)),
-        "extractExpandableRegions": bool(raw.get("extractExpandableRegions", True)),
+        "targetChunkChars": max(10000, min(120000, int(raw.get("targetChunkChars", 40000) or 40000))),
+        "maxChaptersPerChunk": max(1, min(60, int(raw.get("maxChaptersPerChunk", 25) or 25))),
+        "distillWorkers": max(1, min(12, int(raw.get("distillWorkers", 4) or 4))),
+        "globalInputMaxChars": max(
+            200000,
+            min(1500000, int(raw.get("globalInputMaxChars", 1200000) or 1200000)),
+        ),
     }
 
 
@@ -494,7 +489,10 @@ class Project:
         self._open_read_repo()
         self._refresh_counts()
         self.status = "writing"
-        self.playing = True
+        # 锁定只表示世界与规划已经就绪，不应暗中触发正文生成。
+        # 正文必须由用户显式点击 play/step/起稿接口后才开始；对要求人工采纳
+        # 或 Agent 手写正文的项目，这也避免 lock 返回后 ChapterWriter 抢跑。
+        self.playing = False
         self._touch()
 
     def _open_or_seed_build_repo(self) -> None:
@@ -902,6 +900,104 @@ class Project:
             persona_names = {p.agent_id: rt.get_character_display_name(p.agent_id, p.name)
                              for p in rt.list_personas()}
             chapters = rt.list_chapter_plans()
+            knowledge = get_knowledge_package(rt).get("package", {})
+            locations = [schemas.location_out(l) for l in rt.list_locations()]
+            if not locations:
+                locations = [
+                    {
+                        "locId": str(item.get("id", "")),
+                        "partId": None,
+                        "name": str(item.get("name", "")),
+                        "geoFull": str(item.get("detail") or item.get("summary") or ""),
+                        "connectsTo": [],
+                        "controllingFaction": "",
+                        "notableItems": [],
+                        "level": str(item.get("level") or "其他"),
+                        "parent": str(item.get("parent") or ""),
+                        "cultureLocal": str(item.get("culture") or ""),
+                        "summary": str(item.get("summary") or item.get("description") or ""),
+                        "detail": str(item.get("detail") or item.get("description") or ""),
+                    }
+                    for item in (knowledge.get("locations") or [])
+                    if isinstance(item, dict) and str(item.get("name", "")).strip()
+                ]
+            factions = [schemas.faction_out(f) for f in rt.list_factions()]
+            if not factions:
+                factions = [
+                    {
+                        "factionId": str(item.get("id", "")),
+                        "name": str(item.get("name", "")),
+                        "ideology": str(item.get("ideology") or ""),
+                        "goals": str(item.get("goals") or ""),
+                        "methods": str(item.get("methods") or ""),
+                        "territory": list(item.get("territory") or []),
+                        "structure": str(item.get("structure") or ""),
+                        "keyMembers": list(item.get("key_members") or []),
+                        "history": str(item.get("history") or ""),
+                        "relations": list(item.get("relations") or []),
+                        "secret": str(item.get("secret") or ""),
+                        "summary": str(item.get("summary") or item.get("description") or ""),
+                        "detail": str(item.get("detail") or item.get("description") or ""),
+                        "source": "unified_distillation",
+                    }
+                    for item in (knowledge.get("factions") or [])
+                    if isinstance(item, dict) and str(item.get("name", "")).strip()
+                ]
+            character_cards = [
+                schemas.character_card_out(
+                    c,
+                    rt.get_character_display_name(c.agent_id or "", c.name) if c.agent_id else c.name,
+                )
+                for c in rt.list_cards()
+            ]
+            if not character_cards:
+                character_cards = [
+                    {
+                        "cardId": str(item.get("id", "")),
+                        "agentId": str(item.get("id", "")),
+                        "tier": str(item.get("tier") or item.get("role_tier") or "supporting"),
+                        "slotKey": None,
+                        "name": str(item.get("name", "")),
+                        "displayName": str(item.get("name", "")),
+                        "oneLiner": str(item.get("summary") or item.get("one_liner") or ""),
+                        "voiceRegister": str(item.get("voice") or ""),
+                        "definingTrait": str(item.get("defining_trait") or item.get("stable_trait") or ""),
+                        "coreDesire": str(item.get("want") or item.get("core_desire") or ""),
+                        "verbalHabits": str(item.get("verbal_habits") or ""),
+                        "keyRelation": str(item.get("key_relation") or ""),
+                        "backstory": str(item.get("backstory") or ""),
+                        "fatalFlaw": str(item.get("fatal_flaw") or ""),
+                        "arc": str(item.get("arc") or item.get("growth_axis") or ""),
+                        "appearance": str(item.get("appearance") or ""),
+                        "socialRole": str(item.get("social_role") or ""),
+                        "psychology": str(item.get("psychology") or ""),
+                        "finalState": item.get("final_state") or {},
+                    }
+                    for item in (knowledge.get("characters") or [])
+                    if isinstance(item, dict) and str(item.get("name", "")).strip()
+                ]
+            bible_sections = rt.list_bible_sections()
+            if not bible_sections:
+                assertions = (knowledge.get("world_setting") or {}).get("assertions") or []
+                grouped: dict[str, list[str]] = {}
+                for item in assertions:
+                    if not isinstance(item, dict) or not str(item.get("claim", "")).strip():
+                        continue
+                    grouped.setdefault(str(item.get("category") or "settingCore"), []).append(
+                        f"第{int(item.get('chapter', 0) or 0)}章：{str(item.get('claim', '')).strip()}"
+                    )
+                bible_sections = [
+                    {
+                        "id": -(index + 1),
+                        "section": section,
+                        "title": section,
+                        "body_full": "\n".join(claims),
+                        "summary": "；".join(claims[:3]),
+                        "source": "unified_distillation",
+                        "created_at": 0,
+                    }
+                    for index, (section, claims) in enumerate(grouped.items())
+                ]
             return {
                     "planned": True,
                     "continuation": True,
@@ -937,20 +1033,26 @@ class Project:
                     } for c in chapters],
                     "revealChain": [],
                     "inventory": [],
-                    "locations": [schemas.location_out(l) for l in rt.list_locations()],
-                    "factions": [schemas.faction_out(f) for f in rt.list_factions()],
-                    "characterCards": [
-                        schemas.character_card_out(
-                            c,
-                            rt.get_character_display_name(c.agent_id or "", c.name) if c.agent_id else c.name,
-                        )
-                        for c in rt.list_cards()
-                    ],
-                    "bibleSections": rt.list_bible_sections(),
+                    "locations": locations,
+                    "factions": factions,
+                    "characterCards": character_cards,
+                    "bibleSections": bible_sections,
                     "foreshadows": rt.list_foreshadows(),
-                    "openThreads": [{"id": t.thread_id, "question": t.central_question,
-                                     "status": t.status, "tension": t.current_tension}
-                                    for t in rt.list_threads()],
+                    "openThreads": (
+                        [{"id": t.thread_id, "question": t.central_question,
+                          "status": t.status, "tension": t.current_tension}
+                         for t in rt.list_threads()]
+                        or [
+                            {
+                                "id": str(item.get("thread_id", "")),
+                                "question": str(item.get("question", "")),
+                                "status": str(item.get("status", "open")),
+                                "tension": float(item.get("confidence", 0.0) or 0.0),
+                            }
+                            for item in (knowledge.get("plot_threads") or [])
+                            if isinstance(item, dict)
+                        ]
+                    ),
                     "sourceEvents": rt.list_source_events(),
                     "codex": rt.list_codex(),
                     "storyArcs": rt.list_story_arcs(),
@@ -1194,8 +1296,35 @@ class Project:
             file_path=file_path,
             file_paths=file_paths,
         )
+        return self._finish_source_import(result, filename=filename, source_text=text)
+
+    def import_source_uploads(self, files: list[tuple[str, bytes]]) -> dict[str, Any]:
+        if not self._ensure_repo_for_new_chain():
+            return {"ok": False, "error": "no_repo"}
+        if not files:
+            return {"ok": False, "error": "empty"}
+        result = import_uploaded_into_repo(
+            self.repo,
+            project_id=self.id,
+            created_at=_now(),
+            files=files,
+        )
+        filenames = [Path(name).name for name, _payload in files]
+        return self._finish_source_import(
+            result,
+            filename=", ".join(filenames),
+            source_text="",
+        )
+
+    def _finish_source_import(
+        self,
+        result: dict[str, int | str],
+        *,
+        filename: str,
+        source_text: str,
+    ) -> dict[str, Any]:
         chapters = int(result.get("chapters", 0) or 0)
-        source_hash_basis = text if text.strip() else "|".join(
+        source_hash_basis = source_text if source_text.strip() else "|".join(
             f"{doc.filename}:{doc.raw_text[:5000]}" for doc in self.repo.list_source_documents()
         )
         self.repo.set_project_meta(
@@ -1415,100 +1544,78 @@ class Project:
         meta.continuation_phase = "distilling"
         self.repo.set_continuation_meta(meta)
         shared_llm = self._gen_llm() if callable(self._gen_llm) else self._gen_llm
-        distill_workers = int(config.get("distillWorkers", 8) or 8)
-        outline_chapters = int(config.get("outlineChapters", 0) or 0)  # >0 走旧扁平模式
-        outline_parts = int(config.get("outlineParts", 4) or 4)
-        outline_arcs_per_part = int(config.get("outlineArcsPerPart", 3) or 3)
-        outline_chapters_per_arc = int(config.get("outlineChaptersPerArc", 5) or 5)
-        c2_result: dict[str, Any] = {}
-        for idx, (code, _label) in enumerate(CONTINUATION_PHASE_STEPS, 1):
-            job.phase = code
-            job.progress = idx
-            job.status = "running" if idx < total else "done"
-            distill_summary: dict[str, Any] = {}
-            style_summary: dict[str, Any] = {}
-            if code == "B2":
-                # 世界配置（5 节）— 仍用 LLM 归纳，但读的是已清洗正文
-                distill_summary = distill_continuation_world(self.repo, llm=shared_llm)
-            elif code == "B3":
-                # C1 每章逐字蒸馏：事件 / 人物快照 / 设定 codex / 伏笔候选（章并发）
-                distill_summary = distill_all_chapters(
-                    self.repo, shared_llm, created_at=_now(), max_workers=distill_workers,
-                )
-            elif code == "B4":
-                # C2 全书聚合：材料化角色/地点/势力 + 弧线/书末/时间线/图谱/伏笔配对/线索
-                c2_result = aggregate_full_book(self.repo, shared_llm)
-                # Keep a deterministic graph fallback for short books and mock
-                # clients where the C2 graph refiner has too little material.
-                if not self.repo.list_edges():
-                    distill_continuation_world(self.repo, llm=None)
-                    distill_continuation_structures(self.repo, llm=None)
-                    graph_fallback = distill_continuation_graph(self.repo, llm=None)
-                    c2_result["graph_edges"] = graph_fallback.get("edges", 0)
-                # 把 C2 的书末状态/时间线/线索写进 story_bible_v2（先建基础记录再覆写）
-                self.build_story_bible()
-                rec = self.repo.get_story_bible_record()
-                if rec is not None:
-                    if c2_result.get("last_state"):
-                        rec.last_state_json = c2_result["last_state"]
-                    if c2_result.get("timeline"):
-                        rec.timeline_json = c2_result["timeline"]
-                    rec.open_threads_json = [
-                        {"question": t.central_question, "status": t.status}
-                        for t in self.repo.list_threads()
-                    ]
-                    self.repo.upsert_story_bible_record(rec)
-                distill_summary = {k: v for k, v in c2_result.items()
-                                   if k not in ("last_state", "timeline")}
-            elif code == "B5":
-                # C3 续写全书多级大纲（Parts→Arcs→ChapterPlans，写作层按 sequence_order 命中）
-                distill_summary = build_continuation_outline(
-                    self.repo, shared_llm,
-                    num_chapters=outline_chapters,                 # >0 走扁平兼容
-                    n_parts=outline_parts,
-                    arcs_per_part=outline_arcs_per_part,
-                    chapters_per_arc=outline_chapters_per_arc,
-                )
-            elif code == "B6":
-                from novel_engine.style import build_style_corpus, distill_author_experience
-
-                style_summary = build_style_corpus(self.repo, project_id=self.id)
-                # 经历层完全可选：未开启 / 无路径 / 文件不存在 → 直接跳过，不报错、不落假数据
-                exp_enabled = bool(meta.experience_layer_enabled)
-                exp_path = (meta.experience_source_path or "").strip()
-                exp_ok = exp_enabled and exp_path and Path(exp_path).exists()
-                if exp_ok:
-                    source_text = "\n\n".join(ch.text for ch in self.repo.list_source_chapters()[:8])
-                    life_model = distill_author_experience(
-                        self.repo, project_id=self.id, source_path=exp_path,
-                        llm=shared_llm, source_text=source_text,
+        shared_llm = shared_llm or MockClient()
+        phase_summaries: dict[str, Any] = {}
+        try:
+            for idx, (code, _label) in enumerate(CONTINUATION_PHASE_STEPS, 1):
+                job.phase = code
+                job.progress = idx
+                job.status = "running"
+                summary: dict[str, Any]
+                if code == "B1":
+                    chapters = self.repo.list_source_chapters()
+                    summary = {
+                        "documents": len(self.repo.list_source_documents()),
+                        "chapters": len(chapters),
+                        "characters": sum(len(chapter.text or "") for chapter in chapters),
+                    }
+                elif code == "B2":
+                    summary = extract_unified_blocks(
+                        self.repo,
+                        shared_llm,
+                        target_chars=int(config["targetChunkChars"]),
+                        max_chapters=int(config["maxChaptersPerChunk"]),
+                        max_workers=int(config["distillWorkers"]),
                     )
-                    if life_model is not None:
-                        meta.active_life_model_id = life_model.model_id
-                        self.repo.set_continuation_meta(meta)
-                    style_summary = self.repo.style_corpus_summary()
-                    style_summary["experienceLayer"] = "distilled"
+                    if int(summary.get("needsReview", 0) or 0) > 0:
+                        raise ValueError(
+                            f"{summary['needsReview']} 个分块覆盖校验失败；已停止归并，避免生成不可靠知识包"
+                        )
+                elif code == "B3":
+                    summary = reduce_unified_distillation(self.repo)
                 else:
-                    style_summary = self.repo.style_corpus_summary()
-                    style_summary["experienceLayer"] = (
-                        "skipped_not_enabled" if not exp_enabled else
-                        "skipped_no_path" if not exp_path else "skipped_file_missing"
+                    result = synthesize_knowledge_package(
+                        self.repo,
+                        shared_llm,
+                        max_input_chars=int(config["globalInputMaxChars"]),
                     )
-            elif code == "B7":
-                # 最终写作快照：刷新 story bible（不动已生成的大纲 ChapterPlan）
-                self.build_story_bible()
-                style_summary = self.repo.style_corpus_summary()
+                    summary = dict(result.get("stats") or {})
+                    # B4.5 后期审查：对重点但单薄的人物/地点/势力回原文补全（mock 自动跳过）。
+                    review = review_and_augment(self.repo, shared_llm)
+                    summary["augmentedEntities"] = review.get("augmented", 0)
+                phase_summaries[code] = summary
+                job.status = "done" if idx == total else "running"
+                job.config_json = {
+                    **config,
+                    "phaseSummaries": phase_summaries,
+                    "distillSummary": summary,
+                    "steps": _build_continuation_steps(code, done=(idx == total)),
+                }
+                job.updated_at = _now()
+                self.repo.upsert_continuation_job(job)
+        except Exception as exc:
+            job.status = "failed"
+            job.error = str(exc)
             job.config_json = {
                 **config,
-                "distillSummary": distill_summary,
-                "styleSummary": style_summary,
-                "steps": _build_continuation_steps(code, done=(idx == total)),
+                "phaseSummaries": phase_summaries,
+                "steps": _build_continuation_steps(job.phase, done=False),
             }
             job.updated_at = _now()
             self.repo.upsert_continuation_job(job)
+            meta.continuation_phase = "distill_failed"
+            self.repo.set_continuation_meta(meta)
+            return {"ok": False, "jobId": job.id, "error": str(exc)}
         meta.continuation_phase = "distilled"
+        meta.continuation_ready = False
         self.repo.set_continuation_meta(meta)
-        return {"ok": True, "jobId": job.id}
+        self._touch()
+        return {"ok": True, "jobId": job.id, "summary": phase_summaries}
+
+    def continuation_knowledge_package(self) -> dict[str, Any]:
+        if not self._ensure_repo_for_new_chain():
+            return {}
+        return get_knowledge_package(self.repo)
 
     def continuation_job_status(self) -> dict[str, Any]:
         if not self._ensure_repo_for_new_chain():

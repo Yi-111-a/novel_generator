@@ -1,4 +1,4 @@
-import { AlertTriangle, Eye, List } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Eye, List } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getAdapter } from '../adapters';
 import { useProjectCtx, SeedingGate } from '../components/Layouts';
@@ -119,6 +119,11 @@ export function Reading() {
     }
   };
 
+  const buildChapterText = (chapterNo: number, title: string | undefined, body: string) => {
+    const header = title ? `第${chapterNo}章 ${title}` : `第${chapterNo}章`;
+    return `${header}\n\n${body}`;
+  };
+
   if (project.status === 'seeding') return <SeedingGate />;
 
   if (acceptedChapters.length > 0) {
@@ -162,6 +167,9 @@ export function Reading() {
                 <div className="font-serif text-sm tracking-[0.3em] text-zinc-500">第{chapter.chapterNo}章</div>
                 {chapter.title && <div className="mt-2 font-serif text-lg text-zinc-800 dark:text-zinc-100">{chapter.title}</div>}
                 <div className="mx-auto mt-4 h-px w-16 bg-zinc-300 dark:bg-zinc-700" />
+                <div className="mt-3 flex justify-center">
+                  <CopyButton text={buildChapterText(chapter.chapterNo, chapter.title, chapter.prose)} />
+                </div>
               </header>
               <div className="whitespace-pre-wrap font-serif text-[17px] leading-[2] text-zinc-800 dark:text-zinc-200">
                 {chapter.prose}
@@ -233,7 +241,12 @@ export function Reading() {
           </div>
         )}
 
-        {chapters.map((ch) => (
+        {chapters.map((ch) => {
+          const chapterBody = ch.sceneIds
+            .map((sid) => sceneById[sid]?.proseText ?? '')
+            .filter((text) => text.trim().length > 0)
+            .join('\n\n');
+          return (
           <div key={ch.index}>
             <header className="mb-10 mt-4 text-center">
               <div className="font-serif text-sm tracking-[0.3em] text-zinc-500">第{ch.index}章</div>
@@ -243,6 +256,11 @@ export function Reading() {
               )}
               {ch.status === 'ongoing' && <div className="mt-1 text-[11px] text-amber-500">（未完待续）</div>}
               <div className="mx-auto mt-4 h-px w-16 bg-zinc-300 dark:bg-zinc-700" />
+              {chapterBody && (
+                <div className="mt-3 flex justify-center">
+                  <CopyButton text={buildChapterText(ch.index, ch.title, chapterBody)} />
+                </div>
+              )}
             </header>
             {ch.sceneIds.map((sid) => {
               const s = sceneById[sid];
@@ -267,7 +285,8 @@ export function Reading() {
               );
             })}
           </div>
-        ))}
+        );
+        })}
       </article>
     </div>
   );
@@ -314,9 +333,16 @@ function PendingDraftCard({
             </pre>
           )}
           {draft.prose && (
-            <div className="mt-4 whitespace-pre-wrap font-serif text-[17px] leading-[2] text-zinc-800 dark:text-zinc-100">
-              {draft.prose}
-            </div>
+            <>
+              <div className="mt-4 flex">
+                <CopyButton
+                  text={`${draft.title ? `第${draft.chapterNo}章 ${draft.title}` : `第${draft.chapterNo}章`}\n\n${draft.prose}`}
+                />
+              </div>
+              <div className="mt-3 whitespace-pre-wrap font-serif text-[17px] leading-[2] text-zinc-800 dark:text-zinc-100">
+                {draft.prose}
+              </div>
+            </>
           )}
           <div className="mt-4 flex gap-2">
             <button className="btn-primary" onClick={onAccept} disabled={busy !== '' || blocked}>
@@ -417,6 +443,41 @@ function ChapterAuditPanel({ draft }: { draft: ChapterDraft }) {
         </div>
       )}
     </details>
+  );
+}
+
+function CopyButton({ text, label = '复制全章' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2.5 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+      title="复制本章正文（保留分行）"
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+      {copied ? '已复制' : label}
+    </button>
   );
 }
 

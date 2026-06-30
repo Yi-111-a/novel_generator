@@ -94,7 +94,8 @@ export function ProjectLayout() {
             (t.to === 'outline' || t.to === 'read' || t.to === 'world' || t.to === 'sim' || t.to === 'inspect' || t.to === 'ledger');
           const locked =
             (seeding && t.lockInSeeding && !continuationUnlocked) ||
-            (project.type === 'continuation' && !continuationReady && !isContinuationTab && t.to !== 'world');
+            // 续写项目蒸馏后即可进世界配置与检视台（只读检视：知识图谱/日志），无需等续写链就绪。
+            (project.type === 'continuation' && !continuationReady && !isContinuationTab && t.to !== 'world' && t.to !== 'inspect');
           return (
             <NavLink
               key={t.to}

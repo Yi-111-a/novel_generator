@@ -27,6 +27,7 @@ import type {
   ContinuationJobStatus,
   ContinuationSettings,
   ContinuationStyleDiagnostics,
+  DistilledKnowledgePackage,
   ControlAction,
   Dossier,
   Ending,
@@ -262,6 +263,16 @@ export class HttpAdapter implements EngineAdapter {
   importContinuationSources(projectId: string, body: { text: string; filename?: string }): Promise<{ ok: boolean; chapters: number; filename: string }> {
     return this.j(`/projects/${projectId}/continuation/import`, { method: 'POST', body: JSON.stringify(body) });
   }
+  async uploadContinuationSources(projectId: string, files: File[]): Promise<{ ok: boolean; chapters: number; filename: string; documents?: number }> {
+    const body = new FormData();
+    files.forEach((file) => body.append('files', file, file.name));
+    const res = await fetch(`${this.base}/projects/${projectId}/continuation/upload`, {
+      method: 'POST',
+      body,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} @ continuation/upload`);
+    return res.json();
+  }
   getSourceChapters(projectId: string): Promise<SourceChapter[]> {
     return this.j(`/projects/${projectId}/source/chapters`);
   }
@@ -277,7 +288,7 @@ export class HttpAdapter implements EngineAdapter {
   saveContinuationSettings(projectId: string, body: Partial<ContinuationSettings>): Promise<ContinuationSettings & { ok?: boolean }> {
     return this.j(`/projects/${projectId}/continuation/settings`, { method: 'PUT', body: JSON.stringify(body) });
   }
-  startContinuationDistill(projectId: string, body: ContinuationDistillConfig): Promise<{ ok: boolean; jobId?: string }> {
+  startContinuationDistill(projectId: string, body: ContinuationDistillConfig): Promise<{ ok: boolean; jobId?: string; error?: string }> {
     return this.j(`/projects/${projectId}/continuation/distill`, { method: 'POST', body: JSON.stringify(body) });
   }
   getContinuationJob(projectId: string): Promise<ContinuationJobStatus> {
@@ -285,6 +296,9 @@ export class HttpAdapter implements EngineAdapter {
   }
   getContinuationStyleDiagnostics(projectId: string): Promise<ContinuationStyleDiagnostics> {
     return this.j(`/projects/${projectId}/continuation/style-diagnostics`);
+  }
+  getContinuationKnowledgePackage(projectId: string): Promise<DistilledKnowledgePackage> {
+    return this.j(`/projects/${projectId}/continuation/knowledge-package`);
   }
   lockContinuation(projectId: string): Promise<ContinuationSettings & { ok?: boolean }> {
     return this.j(`/projects/${projectId}/continuation/lock`, { method: 'POST' });

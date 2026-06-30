@@ -1234,3 +1234,44 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_source_events_ch ON source_events (chapter_no, seq)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_char_snap_ch ON character_state_snapshots (chapter_no, character_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_foreshadow_status ON foreshadow_setups (status, chapter_no)")
+    # ===== 统一长文本蒸馏：块结果 → 确定性归并 → 全局知识包 =====
+    conn.execute("""CREATE TABLE IF NOT EXISTS distillation_chunks (
+        chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '',
+        chunk_index INTEGER NOT NULL DEFAULT 0, chapter_nos_json TEXT NOT NULL DEFAULT '[]',
+        char_count INTEGER NOT NULL DEFAULT 0, input_hash TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        extraction_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS narrative_entities (
+        canonical_id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
+        aliases_json TEXT NOT NULL DEFAULT '[]', first_seen_chapter INTEGER NOT NULL DEFAULT 0,
+        evidence_json TEXT NOT NULL DEFAULT '{}', confidence REAL NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS narrative_state_changes (
+        change_id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '',
+        chapter_no INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
+        entity_id TEXT NOT NULL DEFAULT '', entity_name TEXT NOT NULL DEFAULT '',
+        field TEXT NOT NULL DEFAULT '', operation TEXT NOT NULL DEFAULT 'replace',
+        old_value_json TEXT NOT NULL DEFAULT 'null', new_value_json TEXT NOT NULL DEFAULT 'null',
+        reason_event TEXT NOT NULL DEFAULT '', certainty TEXT NOT NULL DEFAULT 'explicit',
+        evidence_json TEXT NOT NULL DEFAULT '{}')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS narrative_assertions (
+        assertion_id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '',
+        chapter_no INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '', claim TEXT NOT NULL DEFAULT '',
+        certainty TEXT NOT NULL DEFAULT 'explicit', evidence_json TEXT NOT NULL DEFAULT '{}',
+        supersedes_json TEXT NOT NULL DEFAULT '[]')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS narrative_threads (
+        thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '',
+        opened_chapter INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT '',
+        question TEXT NOT NULL DEFAULT '', evidence_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'open', resolved_chapter INTEGER NOT NULL DEFAULT 0,
+        resolution TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS distilled_knowledge_packages (
+        id INTEGER PRIMARY KEY CHECK (id = 1), project_id TEXT NOT NULL DEFAULT '',
+        package_json TEXT NOT NULL DEFAULT '{}', stats_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL DEFAULT '')""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_distill_chunks_order ON distillation_chunks (chunk_index)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_narrative_state_order ON narrative_state_changes (chapter_no, seq)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_narrative_assertions_subject ON narrative_assertions (category, subject, chapter_no)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_narrative_threads_status ON narrative_threads (status, opened_chapter)")
